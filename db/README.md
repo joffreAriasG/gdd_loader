@@ -43,8 +43,14 @@ encabezado:
 | id_plantilla | GDD-DOMINIO |
 | version_plantilla | 1.0.0 |
 
-(En Fase 2 el generador agregará `codigo_dominio`, `id_carga_base`,
-`id_envio`.)
+Las plantillas precargadas (`generar_cli`) agregan además `codigo_dominio`,
+`id_carga_base`, `id_envio` y `fecha_generacion`. El molde en sí solo necesita
+`id_plantilla` y `version_plantilla`.
+
+El generador toma como molde el `.xlsx` de `GDD_CARPETA_MOLDES` que coincide con
+la huella de la versión VIGENTE y no tiene atributos en DetalleAtributos
+(las filas predefinidas de otras hojas, como los roles de Estructura, se
+permiten).
 
 ### Qué número de versión cambia
 

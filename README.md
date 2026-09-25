@@ -86,6 +86,26 @@ FROM gdd.carga_control ORDER BY id_carga DESC;
 SELECT * FROM gdd.carga_control_detalle WHERE id_carga = <id>;
 ```
 
+### Plantilla precargada para hacer cambios (Fase 2)
+
+```powershell
+python -m gdd_loader.generar_cli --dominio CAC
+```
+
+Genera `CAC_v{version}_c{id_carga}.xlsx` en `GDD_CARPETA_PLANTILLAS`: el molde
+vigente (con sus Office Scripts y su etiqueta de clasificación intactos)
+llenado con la última carga `MERGE_OK` del dominio, y su hoja oculta
+`_Control` con `id_carga_base`. El responsable del dominio edita ese archivo y
+lo sube a la carpeta de entrada.
+
+- Si entre la generación y la carga hubo otra carga exitosa del dominio, se
+  rechaza con `RECHAZADA_DESACTUALIZADA`: generar de nuevo y reaplicar.
+- Cuando se publica una versión nueva de plantilla, basta con volver a
+  generar: los datos pasan al molde nuevo por nombre de columna.
+- El archivo de la última carga OK de cada dominio nunca se purga (es la
+  fuente del generador; si faltara, se usa staging).
+- La primera carga de un dominio nuevo se hace sobre el molde en blanco.
+
 ### Herramientas manuales (diagnóstico / reprocesos)
 
 ```powershell
