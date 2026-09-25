@@ -1,0 +1,36 @@
+# --- Secretos / configuracion local ---
+.env
+.env.*
+!.env.example
+
+# --- Python ---
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+
+# --- Logs y ejecucion ---
+logs/*
+!logs/.gitkeep
+
+# --- Datos: nunca versionar plantillas reales ni extracciones ---
+*.xlsx
+*.xlsm
+*.xls
+*.csv
+~$*
+# Excepcion explicita para fixtures de prueba (si algun dia se agregan):
+!tests/fixtures/*.xlsx
+
+# --- Entregables historicos ya reemplazados por git ---
+Claude outputs/
+
+# --- Editor / SO ---
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
