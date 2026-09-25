@@ -90,7 +90,7 @@ def test_script_semilla_solo_catalogos_simples_y_escapa_comillas(tmp_path):
     assert "N'O''Brien'" in sql
     assert "IsIdentity" in sql and "BEGIN TRANSACTION" in sql and "COMMIT" in sql
     assert "cat_dato_personal" not in sql.split("/* No incluidos")[0]
-    assert "Sensibilidad: 1 valor(es)" in sql
+    assert "Sensibilidad: 1 faltante(s)" in sql
 
 
 def test_limpiar_reporte_errores_sin_control(tmp_path):
@@ -114,3 +114,39 @@ def test_listas_repository_consulta_solo_lectura():
         ["2. Identificativos", "6. Crediticios"]
     sql = str(conn.execute.call_args.args[0])
     assert sql.startswith("SELECT DISTINCT") and "gdd.cat_dato_personal" in sql
+
+
+# --- casos reales detectados por `comparar` en el ambiente de pruebas (2026-09-25) ---
+
+
+def test_marcador_guion_no_es_diferencia_y_se_conserva_en_modo_bd():
+    listas = lr.ListasMolde({"CategoriaNivelUno": ["1. Generales", "-"]}, [])
+    repo = RepoListas(dato_personal={"codigo_categoria_nivel_uno": ["1. Generales"]}, consumo=[("c", "t")])
+    difs = {d.grupo: d for d in lr.comparar(listas, repo)}
+    assert difs["CategoriaNivelUno"].coincide
+    filas, _ = lr.construir_listas(listas, repo)
+    assert ["CategoriaNivelUno", "-"] in filas["ListaDeReferencia"]
+
+
+def test_mayusculas_y_tildes_se_informan_aparte():
+    listas = lr.ListasMolde({"CategoriaNivelUno": ["5. Menores de Edad"]}, [])
+    repo = RepoListas(dato_personal={"codigo_categoria_nivel_uno": ["5. Menores de edad"]})
+    d = next(x for x in lr.comparar(listas, repo) if x.grupo == "CategoriaNivelUno")
+    assert d.faltan_en_bd == [] and d.solo_en_bd == []
+    assert d.equivalentes == [("5. Menores de Edad", "5. Menores de edad")]
+    assert d.estado == "MAYUSCULAS/TILDES"
+
+
+def test_posible_error_de_escritura_propone_update_y_no_inserta_duplicado():
+    listas = lr.ListasMolde({"Dimension": ["Completitud", "Precisión", "Exactitud"]}, [])
+    repo = RepoListas(simples={"cat_tipo_dimension": ["Presición", "Exactitud"]})
+    difs = lr.comparar(listas, repo)
+    d = next(x for x in difs if x.grupo == "Dimension")
+    assert d.faltan_en_bd == ["Completitud"]
+    assert d.posibles_errores == [("Precisión", "Presición")]
+    assert d.estado == "DIFERENCIAS"
+    sql = lr.script_semilla(listas, difs)
+    assert "VALUES (N'Completitud')" in sql
+    assert "VALUES (N'Precisión')" not in sql
+    assert "-- UPDATE gdd.cat_tipo_dimension SET nombre_tipo_dimension = N'Precisión' " \
+           "WHERE nombre_tipo_dimension = N'Presición';" in sql

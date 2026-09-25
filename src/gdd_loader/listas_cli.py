@@ -65,12 +65,15 @@ def main() -> int:
     difs = comparar(listas, ListasRepository(engine))
     print(f"Molde: {molde.name} (version {vigente.version})\n")
     for d in difs:
-        estado = "OK" if d.coincide else "DIFERENCIAS"
-        print(f"[{estado}] {d.grupo} <- {d.origen_bd}")
+        print(f"[{d.estado}] {d.grupo} <- {d.origen_bd}")
         for titulo, valores in (("faltan en BD", d.faltan_en_bd), ("solo en BD", d.solo_en_bd)):
             if valores:
                 muestra = ", ".join(valores[:args.max]) + (" ..." if len(valores) > args.max else "")
                 print(f"    {titulo} ({len(valores)}): {muestra}")
+        for titulo, pares in (("posible error de escritura", d.posibles_errores),
+                              ("solo mayusculas/tildes", d.equivalentes)):
+            for plantilla, bd in pares[:args.max]:
+                print(f"    {titulo}: plantilla '{plantilla}' / BD '{bd}'")
     total = sum(not d.coincide for d in difs)
     print(f"\n{total} grupo(s) con diferencias de {len(difs)}.")
 

@@ -19,14 +19,16 @@ Modos (GDD_LISTAS_REFERENCIA):
 Correspondencia grupo -> catalogo:
   - CATALOGOS_SIMPLES: CONFIRMADOS, son la misma tabla/columna con la que el
     loader valida hoy (pipeline/carga_gdd.py, resolver_catalogo_controlado).
-  - CATALOGOS_DATO_PERSONAL: HIPOTESIS de formato ("codigo. descripcion");
-    `listas_cli comparar` la confirma o descarta contra los datos reales.
+  - CATALOGOS_DATO_PERSONAL: formato "codigo. descripcion" CONFIRMADO con
+    `listas_cli comparar` contra la BD de pruebas (2026-09-25).
   - Grupos sin catalogo (DatoPersonal, AceptaNulos, TipoDatoCampo): del molde.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import difflib
+import unicodedata
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from openpyxl import load_workbook
@@ -35,6 +37,10 @@ from sqlalchemy import text
 HOJA_LISTAS = "ListaDeReferencia"
 HOJA_CONSUMO = "FuentesConsumo"
 HOJA_ERRORES = "Reporte_Errores"
+
+# Valores de la plantilla que no son de catalogo (p. ej. "-" = "no aplica" en
+# CategoriaNivelUno). Nunca cuentan como diferencia y se conservan en modo BD.
+MARCADORES = {"-"}
 
 CATALOGOS_SIMPLES: dict[str, tuple[str, str]] = {
     "Criticidad": ("cat_criticidad", "nombre_criticidad"),
@@ -68,10 +74,46 @@ class Diferencia:
     origen_bd: str  # descripcion del catalogo o "sin catalogo"
     faltan_en_bd: list[str]
     solo_en_bd: list[str]
+    # (plantilla, bd) que solo difieren en mayusculas/tildes
+    equivalentes: list[tuple[str, str]] = field(default_factory=list)
+    # (plantilla, bd) muy parecidos: probable error de escritura en uno de los dos
+    posibles_errores: list[tuple[str, str]] = field(default_factory=list)
 
     @property
     def coincide(self) -> bool:
-        return not self.faltan_en_bd and not self.solo_en_bd
+        return not (self.faltan_en_bd or self.solo_en_bd or self.equivalentes or self.posibles_errores)
+
+    @property
+    def estado(self) -> str:
+        if self.faltan_en_bd or self.solo_en_bd or self.posibles_errores:
+            return "DIFERENCIAS"
+        return "MAYUSCULAS/TILDES" if self.equivalentes else "OK"
+
+
+def _normalizar(v: str) -> str:
+    sin_tildes = "".join(c for c in unicodedata.normalize("NFD", v) if unicodedata.category(c) != "Mn")
+    return " ".join(sin_tildes.casefold().split())
+
+
+def _diferencia(grupo: str, origen: str, molde: list[str], bd: list[str]) -> Diferencia:
+    molde = [v for v in molde if v not in MARCADORES]
+    faltan = [v for v in molde if v not in bd]
+    sobran = [v for v in bd if v not in molde]
+    equivalentes, posibles = [], []
+    for v in list(faltan):
+        par = next((b for b in sobran if _normalizar(b) == _normalizar(v)), None)
+        if par is None:
+            normal = {_normalizar(b): b for b in sobran}
+            cerca = difflib.get_close_matches(_normalizar(v), list(normal), n=1, cutoff=0.75)
+            if cerca:
+                posibles.append((v, normal[cerca[0]]))
+                faltan.remove(v)
+                sobran.remove(normal[cerca[0]])
+            continue
+        equivalentes.append((v, par))
+        faltan.remove(v)
+        sobran.remove(par)
+    return Diferencia(grupo, origen, faltan, sobran, equivalentes, posibles)
 
 
 def _txt(v) -> str | None:
@@ -150,7 +192,7 @@ def listas_bd(repo: ListasRepository) -> tuple[dict[str, list[str]], dict[str, s
         origen[grupo] = f"gdd.{tabla}.{col}"
     for grupo, (cod, desc) in CATALOGOS_DATO_PERSONAL.items():
         valores[grupo] = repo.valores_dato_personal(cod, desc)
-        origen[grupo] = f"gdd.cat_dato_personal ({cod} + '. ' + {desc}) [formato por confirmar]"
+        origen[grupo] = f"gdd.cat_dato_personal ({cod} + '. ' + {desc})"
     return valores, origen
 
 
@@ -161,15 +203,10 @@ def comparar(molde: ListasMolde, repo: ListasRepository) -> list[Diferencia]:
         if grupo not in valores:
             difs.append(Diferencia(grupo, "sin catalogo (se usa el molde)", [], []))
             continue
-        bd = valores[grupo]
-        difs.append(Diferencia(grupo, origen[grupo],
-                               [v for v in vals_molde if v not in bd],
-                               [v for v in bd if v not in vals_molde]))
-    bd_consumo = repo.fuentes_consumo()
+        difs.append(_diferencia(grupo, origen[grupo], vals_molde, valores[grupo]))
     fmt = lambda t: f"{t[0]} / {t[1]}"  # noqa: E731
-    difs.append(Diferencia(HOJA_CONSUMO, "gdd.base_datos_fuente + base_datos_fuente_tabla",
-                           [fmt(t) for t in molde.consumo if t not in bd_consumo],
-                           [fmt(t) for t in bd_consumo if t not in molde.consumo]))
+    difs.append(_diferencia(HOJA_CONSUMO, "gdd.base_datos_fuente + base_datos_fuente_tabla",
+                            [fmt(t) for t in molde.consumo], [fmt(t) for t in repo.fuentes_consumo()]))
     return difs
 
 
@@ -187,6 +224,8 @@ def construir_listas(molde: ListasMolde, repo: ListasRepository) -> tuple[dict[s
         elif not vals:
             avisos.append(f"{grupo}: el catalogo de la BD esta vacio; se conserva la lista del molde")
             vals = vals_molde
+        else:
+            vals = list(vals) + [m for m in vals_molde if m in MARCADORES and m not in vals]
         filas_listas.extend([grupo, v] for v in vals)
     consumo = repo.fuentes_consumo()
     if not consumo:
@@ -199,37 +238,60 @@ def _sql_literal(valor: str) -> str:
     return "N'" + valor.replace("'", "''") + "'"
 
 
+def _insert(tabla: str, col: str, lit: str) -> str:
+    return (
+        f"IF NOT EXISTS (SELECT 1 FROM gdd.{tabla} WHERE {col} = {lit})\n"
+        f"    IF COLUMNPROPERTY(OBJECT_ID('gdd.{tabla}'), 'id', 'IsIdentity') = 1\n"
+        f"        INSERT INTO gdd.{tabla} ({col}) VALUES ({lit});\n"
+        f"    ELSE\n"
+        f"        INSERT INTO gdd.{tabla} (id, {col}) SELECT ISNULL(MAX(id), 0) + 1, {lit} FROM gdd.{tabla};"
+    )
+
+
 def script_semilla(molde: ListasMolde, difs: list[Diferencia]) -> str:
     """Script T-SQL (para el ambiente de PRUEBAS) que inserta en los
     catalogos simples los valores de la plantilla que faltan en la BD. No se
-    ejecuta solo: se revisa y se corre a mano. Soporta id IDENTITY o no."""
-    faltantes = {d.grupo: d.faltan_en_bd for d in difs if d.grupo in CATALOGOS_SIMPLES and d.faltan_en_bd}
+    ejecuta solo: se revisa y se corre a mano. Soporta id IDENTITY o no.
+
+    Los probables errores de escritura NO se insertan (se crearia un valor
+    duplicado): se deja un UPDATE comentado para decidir. Las diferencias de
+    mayusculas/tildes tampoco se insertan (se informan)."""
     lineas = [
         "/* Semilla de catalogos para AMBIENTE DE PRUEBAS, generada desde la plantilla registrada.",
         "   Inserta solo valores que faltan (NOT EXISTS). Revisar antes de correr.",
         "   NO correr en produccion. Todo o nada: si algo falla se revierte completo. */",
         "SET XACT_ABORT ON;", "SET NOCOUNT ON;", "BEGIN TRANSACTION;", "",
     ]
-    if not faltantes:
-        lineas.append("-- No faltan valores en los catalogos simples.")
-    for grupo, valores in faltantes.items():
-        tabla, col = CATALOGOS_SIMPLES[grupo]
-        lineas.append(f"-- {grupo} -> gdd.{tabla}.{col} ({len(valores)} valor(es))")
-        for v in valores:
-            lit = _sql_literal(v)
-            lineas.append(
-                f"IF NOT EXISTS (SELECT 1 FROM gdd.{tabla} WHERE {col} = {lit})\n"
-                f"    IF COLUMNPROPERTY(OBJECT_ID('gdd.{tabla}'), 'id', 'IsIdentity') = 1\n"
-                f"        INSERT INTO gdd.{tabla} ({col}) VALUES ({lit});\n"
-                f"    ELSE\n"
-                f"        INSERT INTO gdd.{tabla} (id, {col}) SELECT ISNULL(MAX(id), 0) + 1, {lit} FROM gdd.{tabla};"
-            )
+    simples = [d for d in difs if d.grupo in CATALOGOS_SIMPLES]
+    hubo = False
+    for d in simples:
+        tabla, col = CATALOGOS_SIMPLES[d.grupo]
+        if not (d.faltan_en_bd or d.posibles_errores or d.equivalentes):
+            continue
+        hubo = True
+        lineas.append(f"-- {d.grupo} -> gdd.{tabla}.{col}")
+        for v in d.faltan_en_bd:
+            lineas.append(_insert(tabla, col, _sql_literal(v)))
+        for plantilla, bd in d.posibles_errores:
+            lineas += [
+                f"-- DECIDIR: posible error de escritura. Plantilla: '{plantilla}' / BD: '{bd}'.",
+                "--   Si el correcto es el de la plantilla, corregir el valor existente (conserva su id",
+                "--   y las filas que ya lo usan) descomentando:",
+                f"-- UPDATE gdd.{tabla} SET {col} = {_sql_literal(plantilla)} WHERE {col} = {_sql_literal(bd)};",
+            ]
+        for plantilla, bd in d.equivalentes:
+            lineas.append(f"-- Solo difiere en mayusculas/tildes (no se inserta): plantilla '{plantilla}' / BD '{bd}'")
         lineas.append("")
-    otros = [d for d in difs if d.grupo not in CATALOGOS_SIMPLES and d.faltan_en_bd]
+    if not hubo:
+        lineas.append("-- No faltan valores en los catalogos simples.")
+    otros = [d for d in difs if d.grupo not in CATALOGOS_SIMPLES and not d.coincide]
     if otros:
-        lineas.append("/* No incluidos (requieren datos que la plantilla no trae; cargar a mano si hace falta):")
+        lineas.append("/* No incluidos (requieren datos que la plantilla no trae; revisar a mano):")
         for d in otros:
-            lineas.append(f"   - {d.grupo}: {len(d.faltan_en_bd)} valor(es) faltantes ({d.origen_bd})")
+            lineas.append(
+                f"   - {d.grupo}: {len(d.faltan_en_bd)} faltante(s), {len(d.equivalentes)} solo mayusculas/tildes, "
+                f"{len(d.posibles_errores)} posible(s) error(es) de escritura ({d.origen_bd})"
+            )
         lineas.append("*/")
     lineas += ["", "COMMIT TRANSACTION;"]
     return "\n".join(lineas) + "\n"
