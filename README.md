@@ -106,6 +106,24 @@ lo sube a la carpeta de entrada.
   fuente del generador; si faltara, se usa staging).
 - La primera carga de un dominio nuevo se hace sobre el molde en blanco.
 
+### Listas de referencia (valores permitidos en la plantilla)
+
+```powershell
+python -m gdd_loader.listas_cli comparar                                    # solo lectura
+python -m gdd_loader.listas_cli comparar --script-semilla semilla.sql       # + script (no se ejecuta)
+```
+
+Compara las listas del molde vigente (`ListaDeReferencia`, `FuentesConsumo`)
+con los catálogos de la BD que usa el loader para validar. En **pruebas**
+muestra en qué difiere la BD de producción y genera un script de semilla para
+revisarlo y correrlo a mano. En **producción**, cuando no haya diferencias,
+activar `GDD_LISTAS_REFERENCIA=BD` para que las plantillas generadas tomen las
+listas de los catálogos. `FuentesPrimarias` siempre sale del molde. La hoja
+`Reporte_Errores` sale vacía en toda plantilla generada.
+
+Para limpiar esa hoja en un molde nuevo (no cambia su huella):
+`python -m gdd_loader.plantilla_cli limpiar --molde <molde> --salida <nuevo>`
+
 ### Herramientas manuales (diagnóstico / reprocesos)
 
 ```powershell
