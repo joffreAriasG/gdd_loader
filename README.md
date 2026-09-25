@@ -53,15 +53,55 @@ copy .env.example .env
 # editar .env con el servidor real y confirmar autenticación/estrategia
 ```
 
-## Ejecutar
+## Ejecutar (operación normal)
 
 ```powershell
-python -m gdd_loader.cli --archivo AdministracionDeSeguros.xlsx
+python -m gdd_loader.procesar_cli
 ```
 
-Lee el archivo desde `GDD_CARPETA_ORIGEN` (definida en `.env`) y carga
-las hojas configuradas en `domain/sheet_config.py` (hoy: `Detalle
-Atributos` y `Metadata Técnica`) a sus tablas de staging.
+Procesa cada archivo de la carpeta de entrada (`GDD_CARPETA_ORIGEN`) de
+punta a punta, con un `id_carga` por archivo registrado en
+`gdd.carga_control`:
+
+1. Valida la plantilla: hoja oculta `_Control` (id y versión declarados)
+   y huella de estructura contra `gdd.plantilla_version`.
+2. Carga las hojas a `staging` (marcadas con `id_carga`).
+3. Si staging quedó completo, ejecuta el merge hacia `gdd`.
+4. Mueve el archivo a `GDD_CARPETA_ARCHIVO` (OK / sin cambios) o a
+   `GDD_CARPETA_RECHAZADOS` (rechazo o error), renombrado como
+   `{dominio}_{id_carga}_{hash8}.xlsx`.
+5. Elimina archivos archivados con más de `GDD_DIAS_RETENCION` días (el
+   registro en `carga_control` se conserva).
+
+El nombre con el que llega el archivo no importa: el dominio se toma de la
+hoja `DetalleAtributos`.
+
+Consultar el resultado:
+
+```sql
+SELECT TOP 20 id_carga, codigo_dominio, estado, version_plantilla,
+       origen_version, subido_por, fecha_inicio, mensaje
+FROM gdd.carga_control ORDER BY id_carga DESC;
+
+SELECT * FROM gdd.carga_control_detalle WHERE id_carga = <id>;
+```
+
+### Herramientas manuales (diagnóstico / reprocesos)
+
+```powershell
+python -m gdd_loader.cli --archivo X.xlsx        # solo Excel -> staging
+python -m gdd_loader.merge_cli --dominio ADS     # solo staging -> gdd
+```
+
+### Versiones de plantilla (equipo central)
+
+Ver `db/README.md`. Resumen:
+
+```powershell
+python -m gdd_loader.plantilla_cli registrar --molde Plantilla_v1.0.0.xlsx --version 1.0.0            # simulación
+python -m gdd_loader.plantilla_cli registrar --molde Plantilla_v1.0.0.xlsx --version 1.0.0 --aplicar  # BORRADOR
+python -m gdd_loader.plantilla_cli publicar --version 1.0.0 --anterior RETIRADA                       # VIGENTE
+```
 
 ## Tests
 
