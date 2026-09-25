@@ -372,7 +372,10 @@ def _siguiente_version(version_actual: str | None) -> str:
 
 
 def ejecutar_merge_dominio(
-    engine: Engine, staging_repo: StagingRepository, codigo_dominio: str
+    engine: Engine,
+    staging_repo: StagingRepository,
+    codigo_dominio: str,
+    id_carga: int | None = None,
 ) -> ResultadoMergeDominio:
     resultado = ResultadoMergeDominio(codigo_dominio=codigo_dominio)
 
@@ -420,6 +423,7 @@ def ejecutar_merge_dominio(
                     repo.registrar_bitacora(
                         conn, "atributo", nuevo_id, Accion.INSERTAR.value,
                         codigo_dominio, codigo_dominio_atributo_op, campos["version"],
+                        id_carga=id_carga,
                     )
                 elif op.accion == Accion.ACTUALIZAR:
                     # Misma fecha_aprobacion: es una correccion, no una
@@ -433,6 +437,7 @@ def ejecutar_merge_dominio(
                         repo.registrar_bitacora(
                             conn, "atributo", op.id_existente, Accion.ACTUALIZAR.value,
                             codigo_dominio, codigo_dominio_atributo_op, None,
+                            id_carga=id_carga,
                         )
                     else:
                         # Misma fecha_aprobacion Y mismos valores -- corrida
@@ -460,6 +465,7 @@ def ejecutar_merge_dominio(
                     repo.registrar_bitacora(
                         conn, "atributo", nuevo_id, Accion.REEMPLAZAR.value,
                         codigo_dominio, codigo_dominio_atributo_op, campos["version"],
+                        id_carga=id_carga,
                     )
                 elif op.accion == Accion.ELIMINAR:
                     repo.eliminar_atributo(conn, op.id_existente)
@@ -468,6 +474,7 @@ def ejecutar_merge_dominio(
                     repo.registrar_bitacora(
                         conn, "atributo", op.id_existente, Accion.ELIMINAR.value,
                         codigo_dominio, codigo_dominio_atributo_op, None,
+                        id_carga=id_carga,
                     )
                 elif op.accion == Accion.OMITIR_FECHA_RETROCEDE:
                     logger.warning(
@@ -480,6 +487,7 @@ def ejecutar_merge_dominio(
                     repo.registrar_bitacora(
                         conn, "atributo", op.id_existente, Accion.OMITIR_FECHA_RETROCEDE.value,
                         codigo_dominio, codigo_dominio_atributo_op, None,
+                        id_carga=id_carga,
                     )
 
             for clave, id_atributo in list(id_atributo_por_clave.items()):
@@ -514,6 +522,7 @@ def ejecutar_merge_dominio(
                         repo.registrar_bitacora(
                             conn, "atributo_fuente_oficial", nuevo_id_fuente, Accion.INSERTAR.value,
                             codigo_dominio, codigo_dominio_atributo, campos["version"],
+                            id_carga=id_carga,
                         )
                     elif op.accion == Accion.ACTUALIZAR:
                         campos = _resolver_campos_fuente(
@@ -528,6 +537,7 @@ def ejecutar_merge_dominio(
                             repo.registrar_bitacora(
                                 conn, "atributo_fuente_oficial", op.id_existente, Accion.ACTUALIZAR.value,
                                 codigo_dominio, codigo_dominio_atributo, None,
+                                id_carga=id_carga,
                             )
                         else:
                             resultado.fuentes_sin_cambios += 1
@@ -547,6 +557,7 @@ def ejecutar_merge_dominio(
                         repo.registrar_bitacora(
                             conn, "atributo_fuente_oficial", nuevo_id_fuente, Accion.REEMPLAZAR.value,
                             codigo_dominio, codigo_dominio_atributo, campos["version"],
+                            id_carga=id_carga,
                         )
                     elif op.accion == Accion.ELIMINAR:
                         repo.eliminar_fuente_oficial(conn, op.id_existente)
@@ -554,6 +565,7 @@ def ejecutar_merge_dominio(
                         repo.registrar_bitacora(
                             conn, "atributo_fuente_oficial", op.id_existente, Accion.ELIMINAR.value,
                             codigo_dominio, codigo_dominio_atributo, None,
+                            id_carga=id_carga,
                         )
                     elif op.accion == Accion.OMITIR_FECHA_RETROCEDE:
                         logger.warning(
@@ -568,6 +580,7 @@ def ejecutar_merge_dominio(
                             conn, "atributo_fuente_oficial", op.id_existente,
                             Accion.OMITIR_FECHA_RETROCEDE.value,
                             codigo_dominio, codigo_dominio_atributo, None,
+                            id_carga=id_carga,
                         )
 
                 # atributo_fuente_consumo (2026-09-17, alcance ampliado;

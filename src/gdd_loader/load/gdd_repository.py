@@ -595,6 +595,7 @@ def registrar_bitacora(
     codigo_dominio: str,
     codigo_dominio_atributo: str,
     version_resultante: str | None,
+    id_carga: int | None = None,
 ) -> None:
     """Una linea por cada operacion de merge aplicada sobre gdd.atributo /
     gdd.atributo_fuente_oficial (INSERTAR/ACTUALIZAR/REEMPLAZAR/ELIMINAR/
@@ -610,20 +611,24 @@ def registrar_bitacora(
     produjo -- la fila vieja queda registrada por su propia linea de
     ELIMINAR/REEMPLAZAR anterior en la bitacora, no se duplica aqui).
     """
+    parametros = {
+        "tabla": tabla,
+        "id_registro": id_registro,
+        "accion": accion,
+        "codigo_dominio": codigo_dominio,
+        "codigo_dominio_atributo": codigo_dominio_atributo,
+        "version_resultante": version_resultante,
+    }
+    # id_carga (Fase 1): solo se escribe si viene informado, para que el
+    # merge_cli anterior siga funcionando aunque aun no se haya corrido el DDL
+    # que agrega gdd.bitacora_carga.id_carga.
+    if id_carga is not None:
+        parametros["id_carga"] = id_carga
+    columnas = ", ".join(parametros)
+    valores = ", ".join(f":{c}" for c in parametros)
     conn.execute(
-        text(
-            "INSERT INTO gdd.bitacora_carga "
-            "(tabla, id_registro, accion, codigo_dominio, codigo_dominio_atributo, version_resultante) "
-            "VALUES (:tabla, :id_registro, :accion, :codigo_dominio, :codigo_dominio_atributo, :version_resultante)"
-        ),
-        {
-            "tabla": tabla,
-            "id_registro": id_registro,
-            "accion": accion,
-            "codigo_dominio": codigo_dominio,
-            "codigo_dominio_atributo": codigo_dominio_atributo,
-            "version_resultante": version_resultante,
-        },
+        text(f"INSERT INTO gdd.bitacora_carga ({columnas}) VALUES ({valores})"),
+        parametros,
     )
 
 

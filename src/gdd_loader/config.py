@@ -28,6 +28,40 @@ class Settings:
     estrategia_staging: str  # "TRUNCATE" o "DOMINIO"
     log_dir: Path
     log_level: str
+    # --- Fase 1: control de cargas (solo los usa procesar_cli) ---
+    carpeta_archivo: Path | None = None
+    carpeta_rechazados: Path | None = None
+    id_plantilla: str = "GDD-DOMINIO"
+    exigir_control: bool = False  # False = transicion (acepta sin _Control si la huella coincide)
+    segundos_estabilidad: int = 60
+    dias_retencion: int = 365
+
+    def validar_procesamiento(self) -> None:
+        """Validaciones adicionales para procesar_cli (control de cargas).
+        Los CLIs anteriores (cli/merge_cli) no las requieren."""
+        errores = []
+        if self.estrategia_staging != "DOMINIO":
+            errores.append(
+                "procesar_cli requiere GDD_ESTRATEGIA_STAGING=DOMINIO (TRUNCATE borraria "
+                "otros dominios en una carga normal)"
+            )
+        carpetas = {
+            "GDD_CARPETA_ORIGEN": self.carpeta_origen,
+            "GDD_CARPETA_ARCHIVO": self.carpeta_archivo,
+            "GDD_CARPETA_RECHAZADOS": self.carpeta_rechazados,
+        }
+        for nombre, carpeta in carpetas.items():
+            if carpeta is None or str(carpeta) in ("", "."):
+                errores.append(f"{nombre} no esta configurada")
+        definidas = [c.resolve() for c in carpetas.values() if c is not None and str(c) not in ("", ".")]
+        if len(set(definidas)) != len(definidas):
+            errores.append("Las carpetas de origen, archivo y rechazados deben ser distintas")
+        if self.segundos_estabilidad < 0:
+            errores.append("GDD_SEGUNDOS_ESTABILIDAD no puede ser negativo")
+        if self.dias_retencion < 0:
+            errores.append("GDD_DIAS_RETENCION no puede ser negativo")
+        if errores:
+            raise ValueError("Configuracion invalida para procesar_cli:\n- " + "\n- ".join(errores))
 
     def validar(self) -> None:
         errores = []
@@ -48,6 +82,11 @@ class Settings:
             raise ValueError("Configuracion invalida:\n- " + "\n- ".join(errores))
 
 
+def _ruta_opcional(variable: str) -> Path | None:
+    valor = os.environ.get(variable, "").strip()
+    return Path(valor) if valor else None
+
+
 def cargar_settings(env_file: str | Path | None = None) -> Settings:
     """Lee el .env (si existe) y las variables de entorno, y arma Settings."""
     if env_file is not None:
@@ -66,5 +105,11 @@ def cargar_settings(env_file: str | Path | None = None) -> Settings:
         estrategia_staging=os.environ.get("GDD_ESTRATEGIA_STAGING", "DOMINIO").upper(),
         log_dir=Path(os.environ.get("GDD_LOG_DIR", "logs")),
         log_level=os.environ.get("GDD_LOG_LEVEL", "INFO").upper(),
+        carpeta_archivo=_ruta_opcional("GDD_CARPETA_ARCHIVO"),
+        carpeta_rechazados=_ruta_opcional("GDD_CARPETA_RECHAZADOS"),
+        id_plantilla=os.environ.get("GDD_ID_PLANTILLA", "GDD-DOMINIO").strip(),
+        exigir_control=os.environ.get("GDD_EXIGIR_CONTROL", "NO").strip().upper() in ("SI", "SÍ", "TRUE", "1"),
+        segundos_estabilidad=int(os.environ.get("GDD_SEGUNDOS_ESTABILIDAD", "60")),
+        dias_retencion=int(os.environ.get("GDD_DIAS_RETENCION", "365")),
     )
     return settings

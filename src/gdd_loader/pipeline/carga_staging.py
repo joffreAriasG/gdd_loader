@@ -64,7 +64,16 @@ def ejecutar(
     hojas: list[SheetConfig],
     repo: StagingRepository,
     estrategia_staging: str,
+    id_carga: int | None = None,
 ) -> list[ResultadoHoja]:
+    """Carga todas las hojas de `archivo` a staging.
+
+    `id_carga` (Fase 1, opcional): si se informa, cada fila de staging queda
+    marcada con la carga que la produjo (columna staging.<tabla>.id_carga,
+    ver db/migraciones/20260925_fase1_control_carga_plantillas.sql). Si es
+    None (CLI anterior `gdd_loader.cli`), no se agrega la columna y el
+    comportamiento es identico al de antes -- funciona con o sin el DDL.
+    """
     resultados: list[ResultadoHoja] = []
     codigos_dominio_heredados: dict[str, str] = {}
 
@@ -114,6 +123,9 @@ def ejecutar(
                         archivo, hojas, fuente
                     )
                 df["codigo_dominio"] = codigos_dominio_heredados[fuente]
+
+            if id_carga is not None:
+                df["id_carga"] = id_carga
 
             logger.info(
                 "Cargando %d filas a %s (estrategia=%s)",
