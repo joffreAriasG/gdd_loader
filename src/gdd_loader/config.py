@@ -35,6 +35,9 @@ class Settings:
     exigir_control: bool = False  # False = transicion (acepta sin _Control si la huella coincide)
     segundos_estabilidad: int = 60
     dias_retencion: int = 365
+    # --- Fase 2: generador de plantillas precargadas (generar_cli) ---
+    carpeta_moldes: Path | None = None
+    carpeta_plantillas: Path | None = None
 
     def validar_procesamiento(self) -> None:
         """Validaciones adicionales para procesar_cli (control de cargas).
@@ -62,6 +65,18 @@ class Settings:
             errores.append("GDD_DIAS_RETENCION no puede ser negativo")
         if errores:
             raise ValueError("Configuracion invalida para procesar_cli:\n- " + "\n- ".join(errores))
+
+    def validar_generacion(self) -> None:
+        errores = []
+        if self.carpeta_moldes is None:
+            errores.append("GDD_CARPETA_MOLDES no esta configurada")
+        if self.carpeta_plantillas is None:
+            errores.append("GDD_CARPETA_PLANTILLAS no esta configurada")
+        elif self.carpeta_origen and str(self.carpeta_origen) not in ("", ".") and \
+                self.carpeta_plantillas.resolve() == self.carpeta_origen.resolve():
+            errores.append("GDD_CARPETA_PLANTILLAS no puede ser la carpeta de entrada (se procesarian solas)")
+        if errores:
+            raise ValueError("Configuracion invalida para generar_cli:\n- " + "\n- ".join(errores))
 
     def validar(self) -> None:
         errores = []
@@ -111,5 +126,7 @@ def cargar_settings(env_file: str | Path | None = None) -> Settings:
         exigir_control=os.environ.get("GDD_EXIGIR_CONTROL", "NO").strip().upper() in ("SI", "SÍ", "TRUE", "1"),
         segundos_estabilidad=int(os.environ.get("GDD_SEGUNDOS_ESTABILIDAD", "60")),
         dias_retencion=int(os.environ.get("GDD_DIAS_RETENCION", "365")),
+        carpeta_moldes=_ruta_opcional("GDD_CARPETA_MOLDES"),
+        carpeta_plantillas=_ruta_opcional("GDD_CARPETA_PLANTILLAS"),
     )
     return settings
