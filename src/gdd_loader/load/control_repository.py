@@ -41,6 +41,7 @@ _COLUMNAS_DETALLE = (
 class CargaAnterior:
     id_carga: int
     hash_archivo: str
+    ruta_archivo: str | None = None
 
 
 class ControlRepository:
@@ -207,18 +208,23 @@ class ControlRepository:
     def ultima_carga_ok(self, codigo_dominio: str) -> CargaAnterior | None:
         with self._engine.connect() as conn:
             fila = conn.execute(
-                text("SELECT TOP 1 id_carga, hash_archivo FROM gdd.carga_control "
+                text("SELECT TOP 1 id_carga, hash_archivo, ruta_archivo_archivado FROM gdd.carga_control "
                      "WHERE codigo_dominio = :d AND estado = 'MERGE_OK' ORDER BY id_carga DESC"),
                 {"d": codigo_dominio},
             ).first()
-            return CargaAnterior(int(fila[0]), fila[1].strip()) if fila else None
+            return CargaAnterior(int(fila[0]), fila[1].strip(), fila[2]) if fila else None
 
     def archivos_a_purgar(self, antes_de: datetime) -> list[tuple[int, str]]:
         with self._engine.connect() as conn:
             filas = conn.execute(
                 text("SELECT id_carga, ruta_archivo_archivado FROM gdd.carga_control "
                      "WHERE fecha_purga_archivo IS NULL AND ruta_archivo_archivado IS NOT NULL "
-                     "AND fecha_inicio < :antes ORDER BY id_carga"),
+                     "AND fecha_inicio < :antes "
+                     # Fase 2: el archivo de la ULTIMA carga OK de cada dominio nunca se
+                     # purga -- es la fuente del generador de plantillas precargadas.
+                     "AND id_carga NOT IN (SELECT MAX(id_carga) FROM gdd.carga_control "
+                     "WHERE estado = 'MERGE_OK' GROUP BY codigo_dominio) "
+                     "ORDER BY id_carga"),
                 {"antes": antes_de},
             ).all()
             return [(int(f[0]), f[1]) for f in filas]

@@ -6,7 +6,8 @@ Todo queda registrado bajo un mismo id_carga en gdd.carga_control:
 
     EN_PROCESO
       -> RECHAZADA_SIN_CONTROL | RECHAZADA_VERSION | RECHAZADA_ESTRUCTURA
-         | RECHAZADA_LOADER | RECHAZADA_DOMINIO           (no toca staging)
+         | RECHAZADA_LOADER | RECHAZADA_DOMINIO
+         | RECHAZADA_DESACTUALIZADA                        (no toca staging)
       -> OMITIDA_SIN_CAMBIOS    (mismo archivo que la ultima carga OK del dominio)
       -> ERROR_STAGING          (alguna hoja fallo; NO se corre el merge)
       -> MERGE_OK | MERGE_PARCIAL | ERROR_MERGE
@@ -43,6 +44,7 @@ logger = logging.getLogger("gdd_loader.pipeline.proceso")
 
 EN_PROCESO = "EN_PROCESO"
 RECHAZADA_DOMINIO = "RECHAZADA_DOMINIO"
+RECHAZADA_DESACTUALIZADA = "RECHAZADA_DESACTUALIZADA"
 OMITIDA_SIN_CAMBIOS = "OMITIDA_SIN_CAMBIOS"
 ERROR_STAGING = "ERROR_STAGING"
 ERROR_MERGE = "ERROR_MERGE"
@@ -200,14 +202,30 @@ def _procesar(archivo: Path, ctx: ContextoCarga, id_carga: int, hash_arch: str,
     resultado.codigo_dominio = dominio
     ctx.control_repo.actualizar_carga(id_carga, codigo_dominio=dominio)
 
-    # 3. Mismo archivo que la ultima carga exitosa del dominio -----------------
+    # 3. La plantilla parte de la ultima carga exitosa (Fase 2) --------------
     anterior = ctx.control_repo.ultima_carga_ok(dominio)
+    if control is not None and control.id_carga_base is not None:
+        vigente = anterior.id_carga if anterior else None
+        if control.id_carga_base != vigente:
+            raise _Rechazo(
+                RECHAZADA_DESACTUALIZADA,
+                f"La plantilla se genero sobre la carga {control.id_carga_base}, pero la ultima carga "
+                f"exitosa de {dominio} es la {vigente}. Genere de nuevo la plantilla y vuelva a "
+                "aplicar sus cambios.",
+            )
+    elif anterior is not None:
+        resultado.advertencias.append(
+            "Plantilla sin id_carga_base (no generada): no se pudo verificar que parta de la "
+            f"ultima carga exitosa ({anterior.id_carga})."
+        )
+
+    # 4. Mismo archivo que la ultima carga exitosa del dominio -----------------
     if anterior is not None and anterior.hash_archivo == hash_arch:
         resultado.estado = OMITIDA_SIN_CAMBIOS
         resultado.mensaje = f"Archivo identico a la carga {anterior.id_carga}; no se reprocesa."
         return
 
-    # 4. Staging ---------------------------------------------------------------
+    # 5. Staging ---------------------------------------------------------------
     resultados_stg = ejecutar(archivo, ctx.hojas, ctx.staging_repo, ctx.estrategia_staging,
                               id_carga=id_carga)
     for r in resultados_stg:
@@ -219,7 +237,7 @@ def _procesar(archivo: Path, ctx: ContextoCarga, id_carga: int, hash_arch: str,
         resultado.mensaje = f"Fallo la carga a staging de: {', '.join(fallidas)}. No se ejecuto el merge."
         return
 
-    # 5. Merge staging -> gdd ----------------------------------------------------
+    # 6. Merge staging -> gdd ----------------------------------------------------
     resumenes = ctx.funcion_merge(ctx.engine, ctx.staging_repo, dominio, id_carga)
     for rm in resumenes:
         ctx.control_repo.registrar_detalle(id_carga, "MERGE", rm.objeto[:60], **rm.conteos())
