@@ -30,6 +30,7 @@ from gdd_loader.exportar.fuente_datos import (
     datos_desde_archivo,
     datos_desde_staging,
 )
+from gdd_loader.exportar.listas_referencia import HOJA_ERRORES, construir_listas, leer_listas_molde
 from gdd_loader.extract.control_reader import leer_control, leer_estructura
 
 logger = logging.getLogger("gdd_loader.exportar")
@@ -47,6 +48,8 @@ class ContextoGenerador:
     id_plantilla: str
     carpeta_moldes: Path
     carpeta_salida: Path
+    modo_listas: str = "MOLDE"  # MOLDE | BD (ver exportar/listas_referencia.py)
+    listas_repo: object = None
 
 
 @dataclass
@@ -148,9 +151,21 @@ def generar_plantilla(codigo_dominio: str, ctx: ContextoGenerador,
         fuente = "STAGING"
         advertencias.append("Generada desde staging: el orden de las filas puede diferir del original.")
 
-    encabezados = pl.restringir_a_contrato(leer_estructura(molde), hojas_contrato)
+    estructura_molde = leer_estructura(molde)
+    encabezados = pl.restringir_a_contrato(estructura_molde, hojas_contrato)
     filas, avisos = alinear_a_molde(datos, encabezados)
     advertencias.extend(avisos)
+
+    # Hojas auxiliares: el reporte de errores de los Office Scripts siempre
+    # sale vacio; las listas de referencia salen de la BD solo en modo BD.
+    if HOJA_ERRORES in estructura_molde:
+        filas[HOJA_ERRORES] = []
+    if ctx.modo_listas == "BD":
+        if ctx.listas_repo is None:
+            raise GeneracionError("Modo de listas BD sin repositorio de listas configurado")
+        listas, avisos_listas = construir_listas(leer_listas_molde(molde), ctx.listas_repo)
+        filas.update({h: f for h, f in listas.items() if h in estructura_molde})
+        advertencias.extend(avisos_listas)
 
     id_envio = str(uuid.uuid4())
     control = {

@@ -38,6 +38,7 @@ class Settings:
     # --- Fase 2: generador de plantillas precargadas (generar_cli) ---
     carpeta_moldes: Path | None = None
     carpeta_plantillas: Path | None = None
+    listas_referencia: str = "MOLDE"  # MOLDE (pruebas) | BD (produccion)
 
     def validar_procesamiento(self) -> None:
         """Validaciones adicionales para procesar_cli (control de cargas).
@@ -75,6 +76,8 @@ class Settings:
         elif self.carpeta_origen and str(self.carpeta_origen) not in ("", ".") and \
                 self.carpeta_plantillas.resolve() == self.carpeta_origen.resolve():
             errores.append("GDD_CARPETA_PLANTILLAS no puede ser la carpeta de entrada (se procesarian solas)")
+        if self.listas_referencia not in ("MOLDE", "BD"):
+            errores.append(f"GDD_LISTAS_REFERENCIA invalido: '{self.listas_referencia}' (MOLDE o BD)")
         if errores:
             raise ValueError("Configuracion invalida para generar_cli:\n- " + "\n- ".join(errores))
 
@@ -128,5 +131,6 @@ def cargar_settings(env_file: str | Path | None = None) -> Settings:
         dias_retencion=int(os.environ.get("GDD_DIAS_RETENCION", "365")),
         carpeta_moldes=_ruta_opcional("GDD_CARPETA_MOLDES"),
         carpeta_plantillas=_ruta_opcional("GDD_CARPETA_PLANTILLAS"),
+        listas_referencia=os.environ.get("GDD_LISTAS_REFERENCIA", "MOLDE").strip().upper(),
     )
     return settings

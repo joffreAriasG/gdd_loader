@@ -21,6 +21,7 @@ import sys
 
 from gdd_loader.config import cargar_settings
 from gdd_loader.domain.sheet_config import HOJAS_ADS
+from gdd_loader.exportar.listas_referencia import ListasRepository
 from gdd_loader.exportar.generador import ContextoGenerador, GeneracionError, generar_plantilla
 from gdd_loader.load.control_repository import ControlRepository
 from gdd_loader.load.db import construir_engine
@@ -51,7 +52,10 @@ def main() -> int:
         id_plantilla=settings.id_plantilla,
         carpeta_moldes=settings.carpeta_moldes,
         carpeta_salida=settings.carpeta_plantillas,
+        modo_listas=settings.listas_referencia,
+        listas_repo=ListasRepository(engine),
     )
+    logger.info("Listas de referencia: %s", "desde la BD" if settings.listas_referencia == "BD" else "del molde")
 
     errores = 0
     for dominio in args.dominio:
@@ -64,7 +68,7 @@ def main() -> int:
             continue
         logger.info("%s -> %s (version %s, base carga %d, fuente %s) filas: %s",
                     dominio, r.ruta, r.version_plantilla, r.id_carga_base, r.fuente,
-                    ", ".join(f"{h} {n}" for h, n in r.filas_por_hoja.items()))
+                    ", ".join(f"{h} {n}" for h, n in r.filas_por_hoja.items() if h != "Reporte_Errores"))
         for a in r.advertencias[:20]:
             logger.warning("%s -> %s", dominio, a)
         if len(r.advertencias) > 20:

@@ -4,4 +4,4 @@
 # gdd.carga_control.version_loader y se compara contra
 # gdd.plantilla_version.version_loader_minima: al hacer `git pull` el valor
 # se actualiza sin necesidad de reinstalar el paquete.
-__version__ = "0.3.0"
+__version__ = "0.4.0"

@@ -90,6 +90,11 @@ def main() -> int:
     reg.add_argument("--aplicar", action="store_true", help="Insertar en la base (sin esto, solo muestra)")
     reg.add_argument("--forzar", action="store_true", help="Registrar aunque haya advertencias")
 
+    lim = sub.add_parser("limpiar", help="Vaciar Reporte_Errores de un molde (no cambia su huella)")
+    lim.add_argument("--molde", required=True, type=Path)
+    lim.add_argument("--salida", required=True, type=Path,
+                     help="Archivo de salida (no puede ser el mismo molde)")
+
     pub = sub.add_parser("publicar", help="Publicar una version registrada (VIGENTE)")
     pub.add_argument("--version", required=True)
     pub.add_argument("--anterior", choices=["DEPRECADA", "RETIRADA"], required=True)
@@ -100,6 +105,19 @@ def main() -> int:
 
     settings = cargar_settings(args.env_file)
     logger = configurar_logging(settings.log_dir, settings.log_level)
+
+    if args.accion == "limpiar":
+        from gdd_loader.exportar.escritor_molde import llenar_molde
+        from gdd_loader.exportar.listas_referencia import HOJA_ERRORES
+        if args.salida.resolve() == args.molde.resolve():
+            print("La salida debe ser un archivo distinto del molde (reemplacelo despues de revisar).")
+            return 1
+        if HOJA_ERRORES not in leer_estructura(args.molde):
+            print(f"El molde no tiene la hoja {HOJA_ERRORES}; nada que limpiar.")
+            return 0
+        llenar_molde(args.molde, args.salida, {HOJA_ERRORES: []}, None)
+        print(f"Molde limpio: {args.salida} (misma huella; scripts y etiqueta intactos)")
+        return 0
 
     if args.accion == "registrar":
         version, problemas = construir_version(

@@ -305,12 +305,13 @@ def llenar_molde(
     molde: Path,
     destino: Path,
     datos: dict[str, list[list]],
-    control: dict[str, str | None],
+    control: dict[str, str | None] | None,
 ) -> ResultadoEscritura:
     """Genera `destino` a partir de `molde`, reemplazando las filas de datos
     de cada hoja de `datos` (hoja -> filas, cada fila en el orden de columnas
     del encabezado del molde) y escribiendo la hoja `_Control`. Las hojas que
-    no vienen en `datos` quedan exactamente como en el molde."""
+    no vienen en `datos` quedan exactamente como en el molde. Con
+    control=None no se toca la hoja _Control (p. ej. al limpiar un molde)."""
     paquete = _Paquete(molde)
     try:
         hojas = paquete.hojas()
@@ -321,7 +322,8 @@ def llenar_molde(
         avisos: list[str] = []
         for hoja, filas in datos.items():
             _reescribir_hoja(paquete, hojas[hoja], filas, estilos_fecha, avisos, hoja)
-        _escribir_control(paquete, hojas, control)
+        if control is not None:
+            _escribir_control(paquete, hojas, control)
         paquete.guardar(destino)
         return ResultadoEscritura({h: len(f) for h, f in datos.items()}, avisos)
     finally:
