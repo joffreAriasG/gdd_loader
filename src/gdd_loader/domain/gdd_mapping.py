@@ -103,7 +103,7 @@ def _bit_x(valor: object) -> bool:
 
 def _entero_o_none(valor: object) -> int | None:
     """Convierte a int, tolerando lo que puede llegar de una columna pandas
-    "Int64" con nulos (tipos={"priorizacion": "Int64", ...} en SheetConfig)
+    "Int64" con nulos (tipos={"avance": "Int64"} en SheetConfig)
     una vez pasa por to_dict("records"): "<NA>", None, "-" o vacio se tratan
     como ausente. int(float(...)) tolera tambien texto tipo "70.0".
     """
@@ -159,7 +159,9 @@ def _bit_si_no(valor: object) -> bool:
 # "YYYY-MM-DD HH:MM:SS" (celda de fecha real de Excel leida con dtype=str,
 # desde que el usuario cambio la plantilla). Se intentan en este orden --
 # formato nuevo primero, ya que es el que trae la plantilla vigente.
-_FORMATOS_FECHA_METADATA_TECNICA = ("%Y-%m-%d %H:%M:%S", "%d-%m-%Y")
+# 2026-10-01: "%d/%m/%Y" (texto dd/mm/aaaa con barras, ej. "14/07/2026" en
+# CLI.xlsx) -- misma convencion dia/mes que "%d-%m-%Y".
+_FORMATOS_FECHA_METADATA_TECNICA = ("%Y-%m-%d %H:%M:%S", "%d-%m-%Y", "%d/%m/%Y")
 
 
 def _parsear_fecha_aprobada_metadata(valor: object, contexto: str) -> datetime.date:
@@ -212,10 +214,11 @@ class AtributoPendiente:
 
 @dataclass(frozen=True)
 class FuenteOficialPendiente:
-    """Una fila destino de gdd.atributo_fuente_oficial, normalizada. Puede
-    salir UNA por fila de staging.metadata_tecnica (la fuente "_oficial",
-    siempre) o DOS (si ademas trae datos reales en las columnas "_foc" --
-    la segunda fuente, con es_fuente_primaria=False).
+    """Una fila destino de gdd.atributo_fuente_oficial, normalizada: UNA
+    por fila de staging.metadata_tecnica, solo con las columnas "_oficial".
+    Desde 2026-10-01 las columnas "_foc" ya no generan una fuente oficial
+    secundaria (ver mapear_metadata_tecnica): van solo a
+    gdd.atributo_fuente_consumo.
     """
 
     codigo_dominio_atributo: str
@@ -230,6 +233,13 @@ class FuenteOficialPendiente:
     acepta_valores_nulos: bool
     formula_calculo: str | None
     fecha_aprobacion: datetime.date | None
+    # 2026-10-01: tabla/archivo de origen dentro de la base de datos fuente
+    # (columna tabla_fuente_oficial de MetadataTecnica). Texto libre, sin
+    # catalogo (puede ser una tabla o un archivo, ej.
+    # "ReporteVentasDiario_dd.mm.yyyy.txt"). Es parte de la CLAVE NATURAL
+    # (ver carga_gdd._clave_fuente): un mismo campo puede venir de varias
+    # tablas/archivos del mismo servidor y base de datos.
+    nombre_tabla: str | None = None
 
     # Nota: a diferencia de AtributoPendiente, esta clase NO expone una
     # `clave_natural` propia -- (clase, es_fuente_primaria) resulto
@@ -280,19 +290,22 @@ def mapear_detalle_atributos(registros: list[dict]) -> list[AtributoPendiente]:
     return resultado
 
 
-def _tiene_datos_foc(fila: dict) -> bool:
-    columnas_foc = ("coleccion_foc", "servidor_foc", "tabla_bv_foc", "nombre_campo_foc")
-    return any(_texto_o_none(fila.get(c)) is not None for c in columnas_foc)
-
-
 def mapear_metadata_tecnica(registros: list[dict]) -> list[FuenteOficialPendiente]:
     """`registros`: filas de staging.metadata_tecnica como dicts.
 
-    Cada fila genera SIEMPRE la fuente primaria (columnas "_oficial"). Si
-    ademas trae datos reales en las columnas "_foc" (no todo "-"), genera
-    tambien una fila secundaria (es_fuente_primaria=False) -- evita
-    insertar una segunda fuente vacia cuando "_foc" no aplica, que es el
-    caso de la gran mayoria de filas hoy.
+    Cada fila genera UNA fuente oficial primaria, solo con las columnas
+    "_oficial" (servidor, base de datos, tabla, clase, campo...).
+
+    CORRECCION 2026-10-01 (definicion del usuario): las columnas "_foc"
+    (servidor_foc, coleccion_foc, tabla_bv_foc, nombre_campo_foc) NUNCA van
+    a gdd.atributo_fuente_oficial. Son exclusivas de
+    gdd.atributo_fuente_consumo (mapear_atributo_fuente_consumo), con sus
+    catalogos controlados (base_datos_fuente / base_datos_fuente_tabla).
+    Antes se generaba ademas una fuente oficial "secundaria"
+    (es_fuente_primaria=False) con tabla_bv_foc como base de datos: duplicaba
+    el consumo y creaba filas en gdd.base_datos_fuente con nombres de tabla
+    (get-or-create). Las existentes se dan de baja con
+    db/migraciones/20261001b_baja_fuentes_secundarias_foc.sql.
     """
     resultado: list[FuenteOficialPendiente] = []
     for fila in registros:
@@ -317,26 +330,9 @@ def mapear_metadata_tecnica(registros: list[dict]) -> list[FuenteOficialPendient
                 acepta_valores_nulos=_bit_si_no(fila["acepta_valores_nulos"]),
                 formula_calculo=_texto_o_none(fila["formula_calculo"]),
                 fecha_aprobacion=fecha,
+                nombre_tabla=_texto_o_none(fila.get("tabla_fuente_oficial")),
             )
         )
-
-        if _tiene_datos_foc(fila):
-            resultado.append(
-                FuenteOficialPendiente(
-                    codigo_dominio_atributo=codigo_dominio_atributo,
-                    es_fuente_primaria=False,
-                    clase_texto=_texto_o_none(fila.get("coleccion_foc")),
-                    servidor_texto=_texto_o_none(fila.get("servidor_foc")),
-                    base_datos_texto=_texto_o_none(fila.get("tabla_bv_foc")),
-                    nombre_campo=str(fila.get("nombre_campo_foc") or "").strip(),
-                    longitud_campo=str(fila["longitud_campo_fuente_oficial"]).strip(),
-                    tipo_campo_texto=_texto_o_none(fila["tipo_campo"]),
-                    lista_valores_validos_texto=_texto_o_none(fila["lista_valores_validos"]),
-                    acepta_valores_nulos=_bit_si_no(fila["acepta_valores_nulos"]),
-                    formula_calculo=_texto_o_none(fila["formula_calculo"]),
-                    fecha_aprobacion=fecha,
-                )
-            )
 
     return resultado
 
@@ -371,13 +367,9 @@ class ConsumoPendiente:
 
     RENAME 2026-09-21: el campo Excel/staging `clase_foc` paso a llamarse
     `coleccion_foc` (y este atributo `clase_texto` a `coleccion_texto`) --
-    cambio SOLO de este flujo de consumo, confirmado con el usuario. La fila
-    secundaria de atributo_fuente_oficial (mapear_metadata_tecnica) lee la
-    MISMA columna fisica (ahora coleccion_foc) pero mantiene su propio
-    atributo `clase_texto` sin cambio de nombre -- son dos lecturas
-    independientes del mismo valor de Excel, con semantica distinta en cada
-    destino (aqui resuelve un catalogo controlado; alla es solo texto libre
-    descriptivo guardado en atributo_fuente_oficial.clase).
+    cambio SOLO de este flujo de consumo, confirmado con el usuario. Desde
+    2026-10-01 las columnas "_foc" se leen UNICAMENTE aqui (ya no generan la
+    fuente oficial secundaria de mapear_metadata_tecnica).
 
     servidor_texto/coleccion_texto/nombre_tabla/nombre_campo identifican el
     destino de consumo -- no se expone aqui una property `clave_natural`
@@ -634,7 +626,7 @@ class PlanRemediacionPendiente:
     tipo_plan_texto: str | None
     categoria_plan_texto: str | None
     subcategoria_plan_texto: str | None
-    priorizacion: int | None
+    priorizacion: str | None  # texto libre desde 2026-10-02 (antes int)
     estado_actual_texto: str | None
     fecha_identificacion: datetime.date | None
     fecha_finalizacion_definitiva: datetime.date | None
@@ -677,7 +669,7 @@ def mapear_plan_remediacion(registros: list[dict]) -> list[PlanRemediacionPendie
                 tipo_plan_texto=_texto_o_none(fila.get("tipo_plan")),
                 categoria_plan_texto=_texto_o_none(fila.get("categoria_plan")),
                 subcategoria_plan_texto=_texto_o_none(fila.get("subcategoria_plan")),
-                priorizacion=_entero_o_none(fila.get("priorizacion")),
+                priorizacion=_texto_o_none(fila.get("priorizacion")),
                 estado_actual_texto=_texto_o_none(fila.get("estado_actual")),
                 fecha_identificacion=fila.get("fecha_identificacion"),
                 fecha_finalizacion_definitiva=fila.get("fecha_finalizacion_definitiva"),

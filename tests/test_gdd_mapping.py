@@ -154,14 +154,35 @@ def test_metadata_sin_datos_foc_genera_una_sola_fuente_primaria():
     assert resultado[0].fecha_aprobacion == datetime.date(2025, 1, 31)
 
 
-def test_metadata_con_datos_foc_genera_fuente_primaria_y_secundaria():
-    fila = _fila_metadata(servidor_foc="Servidor B", nombre_campo_foc="CAMPOB")
-    resultado = mapear_metadata_tecnica([fila])
-    assert len(resultado) == 2
-    assert resultado[0].es_fuente_primaria is True
-    assert resultado[1].es_fuente_primaria is False
-    assert resultado[1].servidor_texto == "Servidor B"
-    assert resultado[1].nombre_campo == "CAMPOB"
+def test_metadata_con_datos_foc_no_genera_fuente_oficial_secundaria():
+    """Correccion 2026-10-01: las columnas _foc son solo de consumo. Una
+    fila con las 4 columnas _foc informadas genera UNA fuente oficial
+    (la primaria, con datos _oficial) y nada de _foc se filtra en ella."""
+    fila = _fila_metadata(servidor_foc="Stratio", coleccion_foc="ZB_ZN_TN_CAT",
+                          tabla_bv_foc="ZP_BP_Acp_Fin_TD_Articulo", nombre_campo_foc="CAMPOB")
+    [fuente] = mapear_metadata_tecnica([fila])
+    assert fuente.es_fuente_primaria is True
+    assert fuente.servidor_texto == "Servidor de archivos"
+    assert fuente.base_datos_texto == "https://sftpi.example/Inputs/"
+    assert fuente.nombre_campo == "IDMSVPRODUCTO"
+    valores = {str(v) for v in vars(fuente).values()}
+    assert not valores & {"Stratio", "ZB_ZN_TN_CAT", "ZP_BP_Acp_Fin_TD_Articulo", "CAMPOB"}
+
+
+def test_metadata_con_datos_foc_parciales_tampoco_genera_secundaria():
+    for col in ("servidor_foc", "coleccion_foc", "tabla_bv_foc", "nombre_campo_foc"):
+        resultado = mapear_metadata_tecnica([_fila_metadata(**{col: "X"})])
+        assert len(resultado) == 1 and resultado[0].es_fuente_primaria is True
+
+
+def test_metadata_mapea_tabla_fuente_oficial_a_nombre_tabla():
+    [fuente] = mapear_metadata_tecnica([_fila_metadata()])
+    assert fuente.nombre_tabla == "ReporteVentasDiario_dd.mm.yyyy.txt"
+
+
+def test_metadata_tabla_con_guion_queda_en_none():
+    [fuente] = mapear_metadata_tecnica([_fila_metadata(tabla_fuente_oficial="-")])
+    assert fuente.nombre_tabla is None
 
 
 def test_metadata_sin_fecha_aprobada_queda_en_none():
@@ -467,7 +488,7 @@ def test_plan_remediacion_mapea_todas_las_columnas():
     assert fila.tipo_plan_texto == "Tecnológico"
     assert fila.categoria_plan_texto == "Ajusta Aplicaciones"
     assert fila.subcategoria_plan_texto == "Ajusta Aplicaciones"
-    assert fila.priorizacion == 1
+    assert fila.priorizacion == "1"
     assert fila.estado_actual_texto == "Alertado"
     assert fila.fecha_identificacion == datetime.date(2025, 9, 15)
     assert fila.fecha_finalizacion_definitiva == datetime.date(2026, 1, 30)
@@ -503,6 +524,14 @@ def test_plan_remediacion_observacion_vacia_queda_en_none():
     assert resultado[0].observacion is None
 
 
+def test_plan_remediacion_priorizacion_es_texto_libre():
+    """2026-10-02: priorizacion pasa de entero a texto (la plantilla trae
+    valores no numericos). Se guarda tal cual, recortado."""
+    for valor, esperado in [("Alta", "Alta"), (" P1 - Urgente ", "P1 - Urgente"), ("2", "2")]:
+        [fila] = mapear_plan_remediacion([_fila_plan_remediacion(priorizacion=valor)])
+        assert fila.priorizacion == esperado
+
+
 def test_plan_remediacion_priorizacion_y_avance_vacios_quedan_en_none():
     resultado = mapear_plan_remediacion([_fila_plan_remediacion(priorizacion=None, avance="-")])
     assert resultado[0].priorizacion is None
@@ -536,3 +565,8 @@ def test_plan_remediacion_celda_nan_real_de_excel_queda_en_none():
     # texto literal 'nan'.
     resultado = mapear_plan_remediacion([_fila_plan_remediacion(observacion=float("nan"))])
     assert resultado[0].observacion is None
+
+
+def test_metadata_fecha_aprobada_acepta_dd_mm_aaaa_con_barras():
+    [fuente] = mapear_metadata_tecnica([_fila_metadata(fecha_aprobada="14/07/2026")])
+    assert fuente.fecha_aprobacion == datetime.date(2026, 7, 14)

@@ -19,6 +19,12 @@ cualquier otro estado -> carpeta Rechazados. En ambos casos se renombra a
 
 Todas las dependencias se inyectan (ContextoCarga) para poder probar la
 orquestacion completa sin SQL Server ni carpetas reales.
+
+Notificacion (v0.5.0, opcional: ContextoCarga.notificador): antes y despues
+del merge se toma una foto legible del dominio; la diferencia queda en
+ResultadoCarga.cambios. Al final de cada archivo (ya archivado) se deja el
+evento para el correo. Ninguna falla de notificacion cambia el estado de la
+carga: solo se registra como advertencia en el log.
 """
 
 from __future__ import annotations
@@ -31,6 +37,7 @@ from typing import Callable
 
 from gdd_loader.domain import plantilla as pl
 from gdd_loader.domain.sheet_config import SheetConfig
+from gdd_loader.notificacion.diferencias import CambiosEntidad, comparar
 from gdd_loader.extract.control_reader import (
     hash_archivo,
     leer_control,
@@ -72,6 +79,9 @@ class ContextoCarga:
     funcion_merge: Callable
     estrategia_staging: str = "DOMINIO"
     hoy: Callable[[], date] = date.today
+    # Opcional (notificacion/evento.Notificador): instantanea(dominio) y
+    # notificar(resultado). None = sin notificacion (comportamiento anterior).
+    notificador: object | None = None
 
 
 @dataclass
@@ -83,6 +93,12 @@ class ResultadoCarga:
     mensaje: str = ""
     advertencias: list[str] = field(default_factory=list)
     ruta_final: Path | None = None
+    # --- datos para la notificacion ---
+    version_plantilla: str | None = None
+    subido_por: str | None = None
+    cambios: list[CambiosEntidad] | None = None   # None = no hubo merge o no se pudo calcular
+    motivo_sin_detalle: str | None = None
+    ruta_notificacion: Path | None = None
 
     @property
     def exitosa(self) -> bool:
@@ -151,7 +167,7 @@ def procesar_archivo(archivo: Path, ctx: ContextoCarga) -> ResultadoCarga:
         origen_subido_por="DOCPROPS" if subido_por else None,
         estado=EN_PROCESO,
     )
-    resultado = ResultadoCarga(nombre, id_carga, EN_PROCESO)
+    resultado = ResultadoCarga(nombre, id_carga, EN_PROCESO, subido_por=subido_por)
     logger.info("Carga %d iniciada: %s (sha256 %s)", id_carga, nombre, hash_arch[:12])
 
     try:
@@ -163,6 +179,7 @@ def procesar_archivo(archivo: Path, ctx: ContextoCarga) -> ResultadoCarga:
         resultado.estado, resultado.mensaje = ERROR, f"{type(exc).__name__}: {exc}"
 
     _archivar(archivo, ctx, resultado, hash_arch)
+    _notificar(ctx, resultado)
     return resultado
 
 
@@ -174,6 +191,7 @@ def _procesar(archivo: Path, ctx: ContextoCarga, id_carga: int, hash_arch: str,
     estructura = leer_estructura(archivo)
 
     version, origen, declarada = _identificar_version(ctx, control, estructura, resultado.advertencias)
+    resultado.version_plantilla = declarada
     real = pl.restringir_a_contrato(estructura, version.columnas) if version else estructura
     ctx.control_repo.actualizar_carga(
         id_carga,
@@ -238,7 +256,11 @@ def _procesar(archivo: Path, ctx: ContextoCarga, id_carga: int, hash_arch: str,
         return
 
     # 6. Merge staging -> gdd ----------------------------------------------------
+    antes = _instantanea(ctx, dominio, resultado)
     resumenes = ctx.funcion_merge(ctx.engine, ctx.staging_repo, dominio, id_carga)
+    despues = _instantanea(ctx, dominio, resultado) if antes is not None else None
+    if antes is not None and despues is not None:
+        resultado.cambios = comparar(antes, despues)
     for rm in resumenes:
         ctx.control_repo.registrar_detalle(id_carga, "MERGE", rm.objeto[:60], **rm.conteos())
     con_error = [rm for rm in resumenes if not rm.ok]
@@ -271,3 +293,29 @@ def _archivar(archivo: Path, ctx: ContextoCarga, resultado: ResultadoCarga, hash
     nivel = logging.INFO if resultado.exitosa else logging.WARNING
     logger.log(nivel, "Carga %d -> %s (%s) %s", resultado.id_carga, resultado.estado,
                resultado.codigo_dominio or "sin dominio", mensaje)
+
+
+def _instantanea(ctx: ContextoCarga, dominio: str, resultado: ResultadoCarga):
+    """Foto legible del dominio para la minuta. Nunca interrumpe la carga."""
+    if ctx.notificador is None:
+        return None
+    try:
+        return ctx.notificador.instantanea(dominio)
+    except Exception as exc:  # noqa: BLE001 - la minuta sale sin detalle, la carga sigue
+        logger.warning("Carga %s: no se pudo leer el estado del dominio %s para la minuta: %s",
+                       resultado.id_carga, dominio, exc)
+        resultado.motivo_sin_detalle = (
+            "No se pudo calcular el detalle de cambios (revisar el log de gdd_loader). "
+            "La carga se aplicó igual; ver el resultado arriba.")
+        return None
+
+
+def _notificar(ctx: ContextoCarga, resultado: ResultadoCarga) -> None:
+    if ctx.notificador is None:
+        return
+    try:
+        resultado.ruta_notificacion = ctx.notificador.notificar(resultado)
+        logger.info("Carga %s: notificacion generada en %s", resultado.id_carga,
+                    resultado.ruta_notificacion)
+    except Exception as exc:  # noqa: BLE001 - el estado de la carga no depende del correo
+        logger.error("Carga %s: no se pudo generar la notificacion: %s", resultado.id_carga, exc)

@@ -275,3 +275,99 @@ def test_si_no_se_puede_mover_se_conserva_el_estado(entorno, monkeypatch):
     assert r.estado == pc.MERGE_OK and archivo.exists()
     assert "No se pudo archivar" in repo.cargas[1]["mensaje"]
     assert "ruta_archivo_archivado" not in repo.cargas[1]
+
+
+# --- Notificacion (v0.5.0) -------------------------------------------------------
+
+
+class NotificadorFalso:
+    def __init__(self, fotos=(), falla_instantanea=False, falla_notificar=False):
+        self.fotos = list(fotos)
+        self.falla_instantanea = falla_instantanea
+        self.falla_notificar = falla_notificar
+        self.instantaneas: list[str] = []
+        self.notificados = []
+
+    def instantanea(self, dominio):
+        self.instantaneas.append(dominio)
+        if self.falla_instantanea:
+            raise RuntimeError("sin conexion")
+        return self.fotos.pop(0)
+
+    def notificar(self, resultado):
+        if self.falla_notificar:
+            raise OSError("carpeta no disponible")
+        self.notificados.append(resultado)
+        return "ruta/evento.json"
+
+
+def _fotos_con_un_atributo_nuevo():
+    from gdd_loader.notificacion.instantanea import Registro
+    return [{"Atributos": {}}, {"Atributos": {("1",): Registro("1 – Poliza")}}]
+
+
+def test_notificacion_toma_foto_antes_y_despues_del_merge(entorno):
+    entrada, _staging, construir, _tmp = entorno
+    archivo = _excel(entrada / "a.xlsx", control=CONTROL_OK)
+    orden = []
+    notif = NotificadorFalso(_fotos_con_un_atributo_nuevo())
+    instantanea_original = notif.instantanea
+    notif.instantanea = lambda d: (orden.append("foto"), instantanea_original(d))[1]
+
+    def merge(*args):
+        orden.append("merge")
+        return _merge_ok()
+
+    ctx = construir(RepoControlFalso([_version()]), funcion_merge=merge)
+    ctx.notificador = notif
+    r = pc.procesar_archivo(archivo, ctx)
+
+    assert r.estado == pc.MERGE_OK
+    assert orden == ["foto", "merge", "foto"]
+    assert [c.etiqueta for c in r.cambios[0].nuevos] == ["1 – Poliza"]
+    assert notif.notificados == [r]
+    assert r.version_plantilla == "1.0.0" and r.subido_por == "Autor Prueba"
+    assert r.ruta_notificacion == "ruta/evento.json"
+    assert r.ruta_final is not None  # se notifica despues de archivar
+
+
+def test_notificacion_de_rechazo_sin_fotos(entorno):
+    entrada, _staging, construir, _tmp = entorno
+    archivo = _excel(entrada / "a.xlsx")
+    notif = NotificadorFalso()
+    ctx = construir(RepoControlFalso([_version()]), exigir_control=True)
+    ctx.notificador = notif
+
+    r = pc.procesar_archivo(archivo, ctx)
+
+    assert r.estado == pl.RECHAZADA_SIN_CONTROL
+    assert notif.instantaneas == [] and r.cambios is None
+    assert notif.notificados == [r]
+
+
+def test_falla_de_foto_no_afecta_la_carga(entorno):
+    entrada, _staging, construir, _tmp = entorno
+    archivo = _excel(entrada / "a.xlsx", control=CONTROL_OK)
+    notif = NotificadorFalso(falla_instantanea=True)
+    ctx = construir(RepoControlFalso([_version()]))
+    ctx.notificador = notif
+
+    r = pc.procesar_archivo(archivo, ctx)
+
+    assert r.estado == pc.MERGE_OK
+    assert notif.instantaneas == ["TST"]  # no reintenta la foto de despues
+    assert r.cambios is None and "No se pudo calcular el detalle" in r.motivo_sin_detalle
+    assert notif.notificados == [r]
+
+
+def test_falla_al_notificar_no_afecta_la_carga(entorno):
+    entrada, _staging, construir, _tmp = entorno
+    archivo = _excel(entrada / "a.xlsx", control=CONTROL_OK)
+    repo = RepoControlFalso([_version()])
+    ctx = construir(repo)
+    ctx.notificador = NotificadorFalso(_fotos_con_un_atributo_nuevo(), falla_notificar=True)
+
+    r = pc.procesar_archivo(archivo, ctx)
+
+    assert r.estado == pc.MERGE_OK and repo.cargas[1]["estado"] == pc.MERGE_OK
+    assert r.ruta_notificacion is None

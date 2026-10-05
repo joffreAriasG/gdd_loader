@@ -39,6 +39,11 @@ class Settings:
     carpeta_moldes: Path | None = None
     carpeta_plantillas: Path | None = None
     listas_referencia: str = "MOLDE"  # MOLDE (pruebas) | BD (produccion)
+    # --- Notificacion de cargas (procesar_cli, v0.5.0) ---
+    carpeta_notificaciones: Path | None = None  # None = sin notificacion
+    notif_id_rol: int = 1                       # rol de gdd.dominio_responsable a notificar
+    notif_ambiente: str = "PRUEBAS"             # PRUEBAS | PRODUCCION (prefijo del asunto)
+    notif_max_filas: int = 200                  # maximo de filas por lista en la minuta
 
     def validar_procesamiento(self) -> None:
         """Validaciones adicionales para procesar_cli (control de cargas).
@@ -64,6 +69,17 @@ class Settings:
             errores.append("GDD_SEGUNDOS_ESTABILIDAD no puede ser negativo")
         if self.dias_retencion < 0:
             errores.append("GDD_DIAS_RETENCION no puede ser negativo")
+        if self.carpeta_notificaciones is not None:
+            if self.notif_ambiente not in ("PRUEBAS", "PRODUCCION"):
+                errores.append(f"GDD_NOTIF_AMBIENTE invalido: '{self.notif_ambiente}' (PRUEBAS o PRODUCCION)")
+            if self.notif_max_filas < 1:
+                errores.append("GDD_NOTIF_MAX_FILAS debe ser mayor que 0")
+            procesadas = [c.resolve() for c in (self.carpeta_origen, self.carpeta_archivo,
+                                                self.carpeta_rechazados)
+                          if c is not None and str(c) not in ("", ".")]
+            if self.carpeta_notificaciones.resolve() in procesadas:
+                errores.append("GDD_CARPETA_NOTIFICACIONES debe ser distinta de las carpetas de "
+                               "entrada, archivo y rechazados")
         if errores:
             raise ValueError("Configuracion invalida para procesar_cli:\n- " + "\n- ".join(errores))
 
@@ -132,5 +148,9 @@ def cargar_settings(env_file: str | Path | None = None) -> Settings:
         carpeta_moldes=_ruta_opcional("GDD_CARPETA_MOLDES"),
         carpeta_plantillas=_ruta_opcional("GDD_CARPETA_PLANTILLAS"),
         listas_referencia=os.environ.get("GDD_LISTAS_REFERENCIA", "MOLDE").strip().upper(),
+        carpeta_notificaciones=_ruta_opcional("GDD_CARPETA_NOTIFICACIONES"),
+        notif_id_rol=int(os.environ.get("GDD_NOTIF_ID_ROL", "1")),
+        notif_ambiente=os.environ.get("GDD_NOTIF_AMBIENTE", "PRUEBAS").strip().upper(),
+        notif_max_filas=int(os.environ.get("GDD_NOTIF_MAX_FILAS", "200")),
     )
     return settings

@@ -184,6 +184,12 @@ HOJAS_ADS: list[SheetConfig] = [
         # que las fechas se guarden siempre en orden YYYY/MM/DD (una
         # columna DATE de SQL Server siempre se representa en ese orden).
         #
+        # CAMBIO 2026-10-05: la plantilla (Office Script 3) normaliza ahora
+        # TODAS las fechas a texto DD/MM/AAAA (dia primero, convencion de
+        # Ecuador). fecha_finalizacion_definitiva deja de declararse mes
+        # primero ("%m/%d/%Y") y queda igual que las demas fechas: fecha real
+        # de Excel + respaldo "%d/%m/%Y" (ver excel_reader.leer_hoja).
+        #
         # RENAME 2026-09-21: el nombre de la hoja en la plantilla Excel real
         # paso de "PlanDeRemediación" (con tilde) a "PlanDeRemediacion" (sin
         # tilde) -- nombre_hoja debe calzar EXACTO con el nombre de la
@@ -203,7 +209,10 @@ HOJAS_ADS: list[SheetConfig] = [
             "acciones_resolucion_definitivo", "avance",
             "fecha_ultima_modificacion", "siro",
         ],
-        tipos={"priorizacion": "Int64", "avance": "Int64"},
+        # priorizacion: texto desde 2026-10-02 (antes Int64) -- la plantilla
+        # trae valores no numericos; gdd.plan_remediacion.priorizacion pasa a
+        # varchar (db/migraciones/20261002_plan_remediacion_priorizacion_varchar.sql).
+        tipos={"avance": "Int64"},
         columna_clave="codigo_dominio_atributo",
         # Ver nota de columna_clave_prefijo_dominio en la clase -- mismo
         # bug real corregido 2026-09-17: el usuario borro una fila de esta
@@ -214,7 +223,7 @@ HOJAS_ADS: list[SheetConfig] = [
         columna_clave_prefijo_dominio=True,
         columnas_fecha={
             "fecha_identificacion": "%Y-%m-%d %H:%M:%S",
-            "fecha_finalizacion_definitiva": "%m/%d/%Y",
+            "fecha_finalizacion_definitiva": "%Y-%m-%d %H:%M:%S",
             "fecha_ultima_modificacion": "%Y-%m-%d %H:%M:%S",
         },
     ),

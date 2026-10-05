@@ -34,6 +34,7 @@ from gdd_loader.load.db import construir_engine
 from gdd_loader.load.staging_repository import StagingRepository
 from gdd_loader.logging_setup import configurar_logging
 from gdd_loader.pipeline.archivos import archivo_estable, listar_pendientes
+from gdd_loader.notificacion.evento import Notificador
 from gdd_loader.pipeline.merge_completo import mergear_dominio_completo
 from gdd_loader.pipeline.proceso_carga import ContextoCarga, procesar_archivo
 from gdd_loader.pipeline.purga import purgar
@@ -73,7 +74,17 @@ def main() -> int:
         usuario_ejecucion=getpass.getuser(),
         funcion_merge=mergear_dominio_completo,
         estrategia_staging=settings.estrategia_staging,
+        notificador=(
+            Notificador(engine, settings.carpeta_notificaciones, settings.notif_id_rol,
+                        settings.notif_ambiente, __version__, settings.notif_max_filas)
+            if settings.carpeta_notificaciones is not None else None
+        ),
     )
+    if settings.carpeta_notificaciones is None:
+        logger.info("Notificaciones desactivadas (GDD_CARPETA_NOTIFICACIONES vacia)")
+    else:
+        logger.info("Notificaciones -> %s | ambiente %s | responsables con id_rol=%s",
+                    settings.carpeta_notificaciones, settings.notif_ambiente, settings.notif_id_rol)
     logger.info("gdd_loader %s | exigir _Control=%s | entrada=%s",
                 __version__, "SI" if settings.exigir_control else "NO (transicion)",
                 settings.carpeta_origen)

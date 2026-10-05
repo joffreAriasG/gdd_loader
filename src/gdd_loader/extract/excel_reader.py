@@ -58,24 +58,36 @@ def leer_hoja(archivo: Path, cfg: SheetConfig) -> pd.DataFrame:
     # (no se prueba con el parser automatico de pandas, que puede
     # interpretar mal fechas ambiguas dd-mm-yyyy vs mm-dd-yyyy).
     _FORMATO_FECHA_REAL_EXCEL = "%Y-%m-%d %H:%M:%S"
+    # 2026-10-01 (CLI.xlsx, Estructura): celdas escritas como TEXTO
+    # "dd/mm/aaaa" (ej. "03/08/2026") en columnas cuya fecha principal es
+    # fecha real de Excel. Convencion dd/mm/aaaa confirmada por los propios
+    # datos (MetadataTecnica del mismo archivo trae "14/07/2026",
+    # "22/11/2023"). Solo se agrega como respaldo cuando el formato principal
+    # es el de fecha real de Excel: columnas con otro formato declarado (ej.
+    # un "%m/%d/%Y" mes primero; desde 2026-10-05 ninguna hoja real lo usa) NO lo usan, para no
+    # interpretar una fecha ambigua con la convencion equivocada.
+    _FORMATO_TEXTO_DD_MM_AAAA = "%d/%m/%Y"
 
     for columna, formato in cfg.columnas_fecha.items():
-        parsed = pd.to_datetime(df[columna], format=formato, errors="coerce")
-        sin_parsear = parsed.isna() & df[columna].notna()
+        texto = df[columna].where(df[columna].isna(), df[columna].astype(str).str.strip())
+        parsed = pd.to_datetime(texto, format=formato, errors="coerce")
+        sin_parsear = parsed.isna() & texto.notna()
 
-        if sin_parsear.any() and formato != _FORMATO_FECHA_REAL_EXCEL:
-            reintento = pd.to_datetime(
-                df.loc[sin_parsear, columna], format=_FORMATO_FECHA_REAL_EXCEL, errors="coerce"
-            )
-            parsed.loc[sin_parsear] = reintento
-            sin_parsear = parsed.isna() & df[columna].notna()
+        respaldos = ([_FORMATO_TEXTO_DD_MM_AAAA] if formato == _FORMATO_FECHA_REAL_EXCEL
+                     else [_FORMATO_FECHA_REAL_EXCEL])
+        for respaldo in respaldos:
+            if not sin_parsear.any():
+                break
+            parsed.loc[sin_parsear] = pd.to_datetime(
+                texto.loc[sin_parsear], format=respaldo, errors="coerce")
+            sin_parsear = parsed.isna() & texto.notna()
 
         if sin_parsear.any():
             valores_malos = sorted(df.loc[sin_parsear, columna].unique().tolist())
             raise ValueError(
                 f"Hoja '{cfg.nombre_hoja}', columna '{columna}': no se pudo parsear como fecha "
-                f"con formato '{formato}' ni con el formato de fecha real de Excel "
-                f"'{_FORMATO_FECHA_REAL_EXCEL}'. Valores sin parsear: {valores_malos}"
+                f"con formato '{formato}' ni con {' / '.join(repr(r) for r in respaldos)}. "
+                f"Valores sin parsear: {valores_malos}"
             )
 
         df[columna] = parsed.dt.date

@@ -124,6 +124,35 @@ listas de los catálogos. `FuentesPrimarias` siempre sale del molde. La hoja
 Para limpiar esa hoja en un molde nuevo (no cambia su huella):
 `python -m gdd_loader.plantilla_cli limpiar --molde <molde> --salida <nuevo>`
 
+### Notificación de cargas (v0.5.0)
+
+Con `GDD_CARPETA_NOTIFICACIONES` configurada, `procesar_cli` deja por cada
+archivo procesado un `resultado_<dominio>_<id_carga>_<id>.json` en esa carpeta
+(sincronizada con SharePoint) y, junto a él, un `.html` con el mismo nombre: la
+minuta como página completa, para abrirla en el navegador o reenviarla a mano
+(copiar y pegar en Outlook conserva las tablas). Un flujo de Power Automate con
+conectores estándar puede tomar el JSON y enviar el correo:
+
+- **Para**: responsables activos del dominio con `id_rol = GDD_NOTIF_ID_ROL`
+  (1 por defecto) en `gdd.dominio_responsable`. El JSON trae los nombres; el
+  flujo los resuelve a correo en el directorio (solo si hay exactamente una
+  coincidencia) y, si no, usa el correo de respaldo configurado en el flujo.
+- **Asunto**: campo `asunto` del JSON (`[PRUEBAS]` fuera de producción).
+- **Cuerpo**: campo `minuta_html`, tipo acta para aprobación: datos de la
+  carga, resumen por sección y, por sección, registros nuevos, modificados
+  (valor anterior → nuevo) y dados de baja. Cubre atributos, fuentes
+  oficiales, fuentes de consumo, responsables, investigación, respaldos y
+  planes de remediación.
+
+Cómo se calcula el detalle: antes y después del merge se toma una foto
+legible (solo `SELECT`, catálogos resueltos a texto) de lo activo del dominio
+y se comparan por clave natural (`notificacion/`). No cambia la lógica del
+merge ni `gdd.bitacora_carga`. Si la foto o la escritura del JSON fallan, la
+carga sigue igual y el problema queda en el log.
+
+El JSON contiene valores de los registros: la carpeta debe tener acceso solo
+para el equipo de gobierno de datos.
+
 ### Herramientas manuales (diagnóstico / reprocesos)
 
 ```powershell

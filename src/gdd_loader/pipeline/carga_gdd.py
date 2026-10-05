@@ -86,10 +86,13 @@ bitacora (mismo criterio que plan_remediacion).
 RENAME 2026-09-21: la columna Excel/staging `clase_foc` paso a llamarse
 `coleccion_foc`, y con ella el atributo `ConsumoPendiente.clase_texto` paso
 a `coleccion_texto` -- alcance SOLO de este flujo (confirmado con el
-usuario). La fila secundaria de atributo_fuente_oficial que tambien lee esta
-columna (ver gdd_mapping.mapear_metadata_tecnica/_tiene_datos_foc) sigue
-usando su propio atributo `FuenteOficialPendiente.clase_texto` sin cambio de
-nombre -- ver nota en gdd_mapping.ConsumoPendiente.
+usuario).
+
+CORRECCION 2026-10-01: las columnas "_foc" van SOLO a atributo_fuente_consumo;
+ya no generan una fuente oficial secundaria (es_fuente_primaria=0) -- ver
+gdd_mapping.mapear_metadata_tecnica. Como el merge compara contra el Excel,
+cualquier secundaria activa que quede en gdd se da de baja en la siguiente
+carga del dominio (o antes, con 20261001b_baja_fuentes_secundarias_foc.sql).
 """
 
 from __future__ import annotations
@@ -256,9 +259,15 @@ def _resolver_id_bdd(conn, pendiente: FuenteOficialPendiente) -> int:
     return id_bdd
 
 
-def _clave_fuente(pendiente: FuenteOficialPendiente, id_bdd: int) -> tuple[str, str, int, bool]:
+def _clave_fuente(pendiente: FuenteOficialPendiente, id_bdd: int) -> tuple[str, str, int, bool, str]:
     """Clave natural real de una fuente oficial dentro de un mismo atributo:
-    (clase, nombre_campo, id_bdd, es_fuente_primaria).
+    (clase, nombre_campo, id_bdd, es_fuente_primaria, nombre_tabla).
+
+    nombre_tabla agregado 2026-10-01: con la clave anterior, filas del mismo
+    servidor/base/clase/campo que solo difieren en la tabla o archivo de
+    origen (ej. category_id en 3 tablas distintas de PROD1) colapsaban en
+    una sola -- confirmado con staging.metadata_tecnica real (consulta de
+    diagnostico del 2026-10-01).
 
     (clase, es_fuente_primaria) por si solo NO alcanza -- confirmado con los
     210 registros reales de metadata_tecnica del dominio ADS: varias filas
@@ -268,7 +277,8 @@ def _clave_fuente(pendiente: FuenteOficialPendiente, id_bdd: int) -> tuple[str, 
     94 (perdida silenciosa de 116); esta clave no tiene colisiones en esos
     mismos datos.
     """
-    return (pendiente.clase_texto or "", pendiente.nombre_campo, id_bdd, pendiente.es_fuente_primaria)
+    return (pendiente.clase_texto or "", pendiente.nombre_campo, id_bdd, pendiente.es_fuente_primaria,
+            pendiente.nombre_tabla or "")
 
 
 def _resolver_campos_fuente(
@@ -300,6 +310,8 @@ def _resolver_campos_fuente(
         "nombre_campo": pendiente.nombre_campo,
         "longitud_campo": pendiente.longitud_campo,
         "clase": pendiente.clase_texto,
+        # Texto libre (2026-10-01), sin catalogo -- parte de la clave natural.
+        "nombre_tabla": pendiente.nombre_tabla,
         "acepta_valores_nulos": pendiente.acepta_valores_nulos,
         "formula_calculo": pendiente.formula_calculo,
         # Texto libre, sin catalogo/FK -- se guarda tal cual viene del Excel.

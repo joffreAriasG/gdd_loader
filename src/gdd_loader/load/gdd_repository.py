@@ -495,8 +495,11 @@ def eliminar_atributo(conn: Connection, id_atributo: int) -> None:
 
 def fuente_oficial_existentes(
     conn: Connection, id_atributo: int
-) -> dict[tuple[str, str, int, bool], ExistenteVersionado]:
-    """Clave natural real: (clase, nombre_campo, id_bdd, es_fuente_primaria).
+) -> dict[tuple[str, str, int, bool, str], ExistenteVersionado]:
+    """Clave natural real: (clase, nombre_campo, id_bdd, es_fuente_primaria,
+    nombre_tabla). nombre_tabla agregado 2026-10-01 (ver
+    carga_gdd._clave_fuente); requiere la migracion
+    db/migraciones/20261001_fuente_oficial_nombre_tabla.sql.
 
     (clase, es_fuente_primaria) por si solo NO alcanza: un mismo atributo
     puede tener varias filas de metadata_tecnica que comparten `clase` pero
@@ -508,13 +511,14 @@ def fuente_oficial_existentes(
     """
     filas = conn.execute(
         text(
-            "SELECT id, clase, nombre_campo, id_bdd, es_fuente_primaria, fecha_aprobacion "
+            "SELECT id, clase, nombre_campo, id_bdd, es_fuente_primaria, nombre_tabla, fecha_aprobacion "
             "FROM gdd.atributo_fuente_oficial WHERE id_atributo = :id_atributo AND activo = 1"
         ),
         {"id_atributo": id_atributo},
     ).all()
     return {
-        (fila.clase or "", fila.nombre_campo, fila.id_bdd, bool(fila.es_fuente_primaria)):
+        (fila.clase or "", fila.nombre_campo, fila.id_bdd, bool(fila.es_fuente_primaria),
+         fila.nombre_tabla or ""):
         ExistenteVersionado(id=fila.id, fecha_aprobacion=fila.fecha_aprobacion)
         for fila in filas
     }
