@@ -11,6 +11,13 @@ Reglas:
 - Correr el SQL ANTES de desplegar el código que lo necesita.
 - Los scripts deben ser idempotentes (IF NOT EXISTS / verificaciones).
 
+### Historial de versiones de plantilla GDD-DOMINIO
+
+| Versión | Loader mínimo | Cambio | SQL |
+|---|---|---|---|
+| 1.0.0 | — | Versión inicial registrada | 20260925_fase1_control_carga_plantillas |
+| 2.0.0 | 0.7.0 | MAJOR: MetadataTecnica sin `clase` ni `_foc`; hoja nueva `MetadataRepositorio` (consumo con clase y fecha). 1.0.0 → RETIRADA | 20261005_metadata_repositorio |
+
 ### Pendiente de incorporar
 Scripts entregados en sesiones anteriores que no estaban en esta carpeta
 (recuperar de donde se guardaron y agregar con su fecha real):

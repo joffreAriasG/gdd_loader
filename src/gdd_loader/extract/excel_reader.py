@@ -20,6 +20,42 @@ class ColumnasFaltantesError(Exception):
     """La hoja no tiene las columnas que el dominio espera."""
 
 
+class ValoresObligatoriosError(ValueError):
+    """Alguna fila trae vacia o con "-" una columna de
+    SheetConfig.columnas_obligatorias."""
+
+
+# Marcador de "sin valor" de la plantilla (mismo que gdd_mapping.VACIO).
+_MARCADOR_VACIO = "-"
+
+
+def _validar_obligatorias(df: pd.DataFrame, cfg: SheetConfig) -> None:
+    """2026-10-05 (MetadataRepositorio): cada columna de
+    cfg.columnas_obligatorias debe traer valor en TODAS las filas -- ni vacia
+    ni "-". Las filas completamente vacias ya se quitaron antes (dropna), asi
+    que una hoja sin filas es valida. Una fila toda "-" NO es vacia: es error
+    (decision del usuario). Se reportan hasta 20 filas, con su numero de fila
+    de Excel (encabezado = fila 1).
+    """
+    if not cfg.columnas_obligatorias or df.empty:
+        return
+    problemas: list[str] = []
+    for idx, fila in df[list(cfg.columnas_obligatorias)].iterrows():
+        faltan = [
+            c for c, v in fila.items()
+            if v is None or (isinstance(v, float) and pd.isna(v))
+            or str(v).strip() in ("", _MARCADOR_VACIO)
+        ]
+        if faltan:
+            problemas.append(f"fila {idx + 2}: {', '.join(faltan)}")
+    if problemas:
+        extra = f" (y {len(problemas) - 20} filas mas)" if len(problemas) > 20 else ""
+        raise ValoresObligatoriosError(
+            f"Hoja '{cfg.nombre_hoja}': todas las columnas son obligatorias (sin vacios ni '-'). "
+            f"Faltan valores en {'; '.join(problemas[:20])}{extra}."
+        )
+
+
 def leer_hoja(archivo: Path, cfg: SheetConfig) -> pd.DataFrame:
     if not archivo.exists():
         raise FileNotFoundError(f"No se encontro el archivo: {archivo}")
@@ -36,6 +72,7 @@ def leer_hoja(archivo: Path, cfg: SheetConfig) -> pd.DataFrame:
 
     df = df[cfg.columnas].copy()
     df = df.dropna(how="all")  # filas completamente vacias al final de la hoja
+    _validar_obligatorias(df, cfg)
 
     for columna, tipo in cfg.tipos.items():
         try:

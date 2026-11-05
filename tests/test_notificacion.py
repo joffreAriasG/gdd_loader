@@ -53,20 +53,45 @@ def test_construir_registros_usa_clave_natural_y_etiqueta_legible():
 def test_fuente_oficial_clave_incluye_bdd_y_marca_primaria():
     fila = {c: None for c in ins.FUENTES_OFICIALES.campos}
     fila.update(codigo_atributo=4, nombre_atributo="x", servidor="SRV1", base_datos="NOVA", tabla="POLIZAS",
-                clase="CLI", nombre_campo="NUMPOL", es_fuente_primaria=True, longitud_campo=10)
+                nombre_campo="NUMPOL", es_fuente_primaria=True, longitud_campo=10)
     registros = ins.construir_registros(ins.FUENTES_OFICIALES, [fila])
-    clave = ("4", "SRV1", "NOVA", "POLIZAS", "CLI", "NUMPOL", "Sí")
+    # 2026-10-05: sin clase (paso a fuentes de consumo).
+    clave = ("4", "SRV1", "NOVA", "POLIZAS", "NUMPOL", "Sí")
     assert list(registros) == [clave]
-    assert registros[clave].etiqueta == "Atributo 4 – SRV1/NOVA/POLIZAS/CLI/NUMPOL (primaria)"
+    assert registros[clave].etiqueta == "Atributo 4 – SRV1/NOVA/POLIZAS/NUMPOL (primaria)"
     assert registros[clave].tabla["Tabla / archivo"] == "POLIZAS"
+    assert "Clase" not in registros[clave].tabla
     assert registros[clave].campos["Longitud"] == "10"
+
+
+def test_fuente_consumo_informa_cambio_de_clase_y_fecha():
+    """2026-10-05: clase y fecha_aprobacion de consumo se muestran como
+    anterior -> nuevo (el merge las actualiza en sitio)."""
+    import datetime
+
+    def consumo(clase, fecha):
+        fila = dict(codigo_atributo=1, nombre_atributo="Codigo establecimiento", servidor="Stratio",
+                    base_datos="gob_reg_alianzas_establecimientos",
+                    tabla="ZP_BP_Mdp_Tc_TN_EstablecimientosConsumos",
+                    nombre_campo="codigoUnicoEstablecimiento", clase=clase, fecha_aprobacion=fecha)
+        return {"Fuentes de consumo": ins.construir_registros(ins.FUENTES_CONSUMO, [fila])}
+
+    [seccion] = [s for s in comparar(
+        consumo(None, None),
+        consumo("Registro_alianzas_establecimientos", datetime.date(2026, 8, 21)),
+    ) if s.entidad == "Fuentes de consumo"]
+    [mod] = seccion.modificados
+    assert [(c.campo, c.anterior, c.nuevo) for c in mod.campos] == [
+        ("Clase", "", "Registro_alianzas_establecimientos"),
+        ("Fecha de aprobación", "", "2026-08-21"),
+    ]
 
 
 def test_fuente_oficial_informa_cambio_de_version():
     def fuente(version):
         fila = {c: None for c in ins.FUENTES_OFICIALES.campos}
         fila.update(codigo_atributo=4, nombre_atributo="x", servidor="SRV1", base_datos="NOVA", tabla="POLIZAS",
-                    clase="CLI", nombre_campo="NUMPOL", es_fuente_primaria=True, version=version)
+                    nombre_campo="NUMPOL", es_fuente_primaria=True, version=version)
         return {"Fuentes oficiales": ins.construir_registros(ins.FUENTES_OFICIALES, [fila])}
 
     fuentes = comparar(fuente("3"), fuente("1"))[1]

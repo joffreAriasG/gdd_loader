@@ -75,6 +75,7 @@ def _clave_orden(valor) -> tuple:
 _ORDEN_HOJA = {
     "DetalleAtributos": "codigo_atributo",
     "MetadataTecnica": "codigo_dominio_atributo",
+    "MetadataRepositorio": "codigo_dominio_atributo",
     "PlanDeRemediacion": "codigo_dominio_atributo",
     "Investigacion": "nombre",
     "Estructura": "codigo_plaza",

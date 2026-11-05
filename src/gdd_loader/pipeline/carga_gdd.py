@@ -88,6 +88,13 @@ RENAME 2026-09-21: la columna Excel/staging `clase_foc` paso a llamarse
 a `coleccion_texto` -- alcance SOLO de este flujo (confirmado con el
 usuario).
 
+CAMBIO 2026-10-05 (plantilla 2.0.0): el consumo se lee de la hoja
+MetadataRepositorio (staging.metadata_repositorio, una fila por destino), ya
+no de las columnas "_foc" de metadata_tecnica. Se agregan clase y
+fecha_aprobacion como campos MUTABLES de atributo_fuente_consumo: si cambian,
+ACTUALIZAR hace UPDATE en sitio (sin versionar, sin bitacora). `clase` sale
+de la fuente oficial (y de su clave natural, ver `_clave_fuente`).
+
 CORRECCION 2026-10-01: las columnas "_foc" van SOLO a atributo_fuente_consumo;
 ya no generan una fuente oficial secundaria (es_fuente_primaria=0) -- ver
 gdd_mapping.mapear_metadata_tecnica. Como el merge compara contra el Excel,
@@ -252,16 +259,20 @@ def _resolver_id_bdd(conn, pendiente: FuenteOficialPendiente) -> int:
     )
     if id_bdd is None:
         raise ValueError(
-            f"{pendiente.codigo_dominio_atributo} (clase='{pendiente.clase_texto}', "
+            f"{pendiente.codigo_dominio_atributo} (campo='{pendiente.nombre_campo}', "
             f"primaria={pendiente.es_fuente_primaria}): falta servidor y/o base de datos "
             "fuente -- gdd.atributo_fuente_oficial.id_bdd es obligatorio."
         )
     return id_bdd
 
 
-def _clave_fuente(pendiente: FuenteOficialPendiente, id_bdd: int) -> tuple[str, str, int, bool, str]:
+def _clave_fuente(pendiente: FuenteOficialPendiente, id_bdd: int) -> tuple[str, int, bool, str]:
     """Clave natural real de una fuente oficial dentro de un mismo atributo:
-    (clase, nombre_campo, id_bdd, es_fuente_primaria, nombre_tabla).
+    (nombre_campo, id_bdd, es_fuente_primaria, nombre_tabla).
+
+    CAMBIO 2026-10-05 (plantilla 2.0.0): sin `clase` -- ya no viene en
+    MetadataTecnica (paso a MetadataRepositorio / fuente de consumo). Debe
+    coincidir con gdd_repository.fuente_oficial_existentes.
 
     nombre_tabla agregado 2026-10-01: con la clave anterior, filas del mismo
     servidor/base/clase/campo que solo difieren en la tabla o archivo de
@@ -277,8 +288,7 @@ def _clave_fuente(pendiente: FuenteOficialPendiente, id_bdd: int) -> tuple[str, 
     94 (perdida silenciosa de 116); esta clave no tiene colisiones en esos
     mismos datos.
     """
-    return (pendiente.clase_texto or "", pendiente.nombre_campo, id_bdd, pendiente.es_fuente_primaria,
-            pendiente.nombre_tabla or "")
+    return (pendiente.nombre_campo, id_bdd, pendiente.es_fuente_primaria, pendiente.nombre_tabla or "")
 
 
 def _resolver_campos_fuente(
@@ -286,8 +296,8 @@ def _resolver_campos_fuente(
 ) -> dict:
     if not pendiente.nombre_campo:
         raise ValueError(
-            f"{pendiente.codigo_dominio_atributo} (clase='{pendiente.clase_texto}', "
-            f"primaria={pendiente.es_fuente_primaria}): nombre_campo vacio -- es obligatorio."
+            f"{pendiente.codigo_dominio_atributo} (primaria={pendiente.es_fuente_primaria}): "
+            "nombre_campo vacio -- es obligatorio."
         )
 
     return {
@@ -309,7 +319,8 @@ def _resolver_campos_fuente(
         ),
         "nombre_campo": pendiente.nombre_campo,
         "longitud_campo": pendiente.longitud_campo,
-        "clase": pendiente.clase_texto,
+        # `clase` ya no se escribe (2026-10-05): la columna se conserva con
+        # sus valores historicos; la clase vive en atributo_fuente_consumo.
         # Texto libre (2026-10-01), sin catalogo -- parte de la clave natural.
         "nombre_tabla": pendiente.nombre_tabla,
         "acepta_valores_nulos": pendiente.acepta_valores_nulos,
@@ -361,7 +372,14 @@ def _resolver_campos_consumo(
         "id_bdd": id_bdd,
         "id_tabla": id_tabla,
         "nombre_campo": pendiente.nombre_campo,
+        **_campos_mutables_consumo(pendiente),
     }
+
+
+def _campos_mutables_consumo(pendiente: ConsumoPendiente) -> dict:
+    """clase / fecha_aprobacion (2026-10-05): lo unico que ACTUALIZAR puede
+    cambiar de una fila de consumo existente (ver repo.CAMPOS_MUTABLES_CONSUMO)."""
+    return {"clase": pendiente.clase, "fecha_aprobacion": pendiente.fecha_aprobacion}
 
 
 def _siguiente_version(version_actual: str | None) -> str:
@@ -398,10 +416,14 @@ def ejecutar_merge_dominio(
         filas_metadata = staging_repo.leer_por_prefijo(
             "staging.metadata_tecnica", "codigo_dominio_atributo", codigo_dominio
         )
+        # 2026-10-05 (plantilla 2.0.0): el consumo sale de MetadataRepositorio.
+        filas_repositorio = staging_repo.leer_por_prefijo(
+            "staging.metadata_repositorio", "codigo_dominio_atributo", codigo_dominio
+        )
 
         atributos_pendientes = mapear_detalle_atributos(filas_detalle)
         fuentes_pendientes = mapear_metadata_tecnica(filas_metadata)
-        consumos_pendientes = mapear_atributo_fuente_consumo(filas_metadata)
+        consumos_pendientes = mapear_atributo_fuente_consumo(filas_repositorio)
 
         fuentes_por_codigo: dict[str, list[FuenteOficialPendiente]] = {}
         for f in fuentes_pendientes:
@@ -518,6 +540,19 @@ def ejecutar_merge_dominio(
                 for f in fuentes:
                     id_bdd_f = _resolver_id_bdd(conn, f)
                     clave_f = _clave_fuente(f, id_bdd_f)
+                    previa = entrantes_fuente.get(clave_f)
+                    if previa is not None and previa[0] != f:
+                        # 2026-10-05: sin `clase` en la clave, dos filas de
+                        # MetadataTecnica que antes solo se diferenciaban por
+                        # clase pasan a ser la misma fuente. Si ademas difieren
+                        # en otro campo (fecha, longitud...), no hay forma de
+                        # saber cual vale: se rechaza en vez de quedarse con la
+                        # ultima en silencio. Duplicado exacto: se toma una vez.
+                        raise ValueError(
+                            f"MetadataTecnica {codigo_dominio_atributo}: la fuente oficial "
+                            f"{f.servidor_texto}/{f.base_datos_texto}/{f.nombre_tabla}/{f.nombre_campo} "
+                            "aparece mas de una vez con valores distintos -- dejar una sola fila."
+                        )
                     entrantes_fuente[clave_f] = (f, f.fecha_aprobacion)
                     id_bdd_por_clave[clave_f] = id_bdd_f
 
@@ -581,11 +616,11 @@ def ejecutar_merge_dominio(
                         )
                     elif op.accion == Accion.OMITIR_FECHA_RETROCEDE:
                         logger.warning(
-                            "%s (clase=%s, campo=%s): fecha_aprobacion entrante es anterior "
+                            "%s (campo=%s, tabla=%s): fecha_aprobacion entrante es anterior "
                             "a la ya registrada -- se omite",
                             codigo_dominio_atributo,
                             op.clave[0],
-                            op.clave[1],
+                            op.clave[3],
                         )
                         resultado.fuentes_omitidas_fecha_retrocede += 1
                         repo.registrar_bitacora(
@@ -596,9 +631,11 @@ def ejecutar_merge_dominio(
                         )
 
                 # atributo_fuente_consumo (2026-09-17, alcance ampliado;
-                # REFACTORIZADA 2026-09-18): ver nota de modulo. Mismo patron
-                # INSERTAR/ACTUALIZAR/ELIMINAR sin fecha (UPDATE in-place)
-                # que respaldo/plan_remediacion, sin bitacora. El destino
+                # REFACTORIZADA 2026-09-18; fuente MetadataRepositorio desde
+                # 2026-10-05): ver nota de modulo. Mismo patron
+                # INSERTAR/ACTUALIZAR/ELIMINAR sin versionar (UPDATE en sitio
+                # de clase/fecha_aprobacion) que respaldo/plan_remediacion,
+                # sin bitacora. El destino
                 # completo (servidor/bdd/tabla) se resuelve ANTES del plan
                 # (parte de la clave natural, ver `_clave_consumo`).
                 consumos = consumos_por_codigo.get(codigo_dominio_atributo, [])
@@ -621,13 +658,18 @@ def ejecutar_merge_dominio(
                         repo.insertar_atributo_fuente_consumo(conn, campos)
                         resultado.consumos_insertados += 1
                     elif op.accion == Accion.ACTUALIZAR:
-                        # Ya no quedan campos mutables -- la clave natural
-                        # completa (id_servidor, id_bdd, id_tabla,
-                        # nombre_tabla_libre, nombre_campo) ya identifica el
-                        # destino; si el plan emite ACTUALIZAR es porque esa
-                        # clave coincidio entre lo existente y lo entrante,
-                        # nunca hay nada que escribir.
-                        resultado.consumos_sin_cambios += 1
+                        # La clave (id_bdd, id_tabla, nombre_campo) coincide;
+                        # solo pueden cambiar clase / fecha_aprobacion
+                        # (2026-10-05). UPDATE en sitio si cambio algo.
+                        campos_mut = _campos_mutables_consumo(op.entrante)
+                        actuales = repo.campos_actuales(
+                            conn, "atributo_fuente_consumo", op.id_existente, campos_mut.keys()
+                        )
+                        if _hay_cambios(campos_mut, actuales):
+                            repo.actualizar_atributo_fuente_consumo(conn, op.id_existente, campos_mut)
+                            resultado.consumos_actualizados += 1
+                        else:
+                            resultado.consumos_sin_cambios += 1
                     elif op.accion == Accion.ELIMINAR:
                         repo.eliminar_atributo_fuente_consumo(conn, op.id_existente)
                         resultado.consumos_eliminados += 1

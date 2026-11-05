@@ -51,6 +51,12 @@ class SheetConfig:
     # Ver pipeline/carga_staging.py (_codigo_dominio_de_hoja): falla si la
     # hoja fuente trae mas de un codigo_dominio distinto en el archivo.
     hereda_codigo_dominio_de: str = ""
+    # 2026-10-05: columnas que deben traer valor en TODAS las filas (ni vacia
+    # ni "-"); si una fila no cumple, la hoja falla al leerse (ver
+    # extract/excel_reader._validar_obligatorias). Las filas completamente
+    # vacias se ignoran, asi que una hoja sin filas es valida. Vacio = sin
+    # validacion (comportamiento de todas las hojas anteriores).
+    columnas_obligatorias: tuple[str, ...] = ()
 
 
 # Plantilla: Administracion De Seguros (dominio ADS).
@@ -90,14 +96,16 @@ HOJAS_ADS: list[SheetConfig] = [
         # EXACTO con la pestaña del Excel).
         nombre_hoja="MetadataTecnica",
         tabla_staging="staging.metadata_tecnica",
+        # PLANTILLA 2.0.0 (2026-10-05): se quitan `clase` y las columnas "_foc"
+        # (coleccion_foc, servidor_foc, tabla_bv_foc, nombre_campo_foc) --
+        # pasaron a la hoja MetadataRepositorio. Las columnas siguen existiendo
+        # en staging.metadata_tecnica (NULL desde esta version); no se borran.
         columnas=[
-            "codigo_dominio_atributo", "clase", "formula_calculo",
+            "codigo_dominio_atributo", "formula_calculo",
             "servidor_fuente_oficial", "base_datos_fuente_oficial",
             "tabla_fuente_oficial", "nombre_campo_fuente_oficial",
             "longitud_campo_fuente_oficial", "lista_valores_validos",
-            "acepta_valores_nulos", "tipo_campo", "coleccion_foc",
-            "servidor_foc", "tabla_bv_foc", "nombre_campo_foc",
-            "fecha_aprobada",
+            "acepta_valores_nulos", "tipo_campo", "fecha_aprobada",
         ],
         columna_clave="codigo_dominio_atributo",
         # Ver nota de columna_clave_prefijo_dominio en la clase: sin esto,
@@ -105,6 +113,32 @@ HOJAS_ADS: list[SheetConfig] = [
         # archivo (ej. se borraron TODAS las fuentes de un atributo) queda
         # huerfana en staging.metadata_tecnica para siempre.
         columna_clave_prefijo_dominio=True,
+    ),
+    SheetConfig(
+        # MetadataRepositorio (plantilla 2.0.0, 2026-10-05): destinos de
+        # CONSUMO de cada atributo (antes columnas "_foc" de MetadataTecnica,
+        # repetidas en cada fila de fuente oficial). Una fila por destino.
+        # Alimenta gdd.atributo_fuente_consumo, incluidas clase (texto libre)
+        # y fecha_aprobacion propias -- `clase` ya no va a la fuente oficial.
+        # Ligada a un ATRIBUTO (codigo_dominio_atributo en la hoja, borrado
+        # por prefijo de dominio, igual que MetadataTecnica). Todas las
+        # columnas obligatorias: ni vacio ni "-" (decision del usuario); la
+        # hoja puede venir sin filas (el merge da de baja los consumos).
+        nombre_hoja="MetadataRepositorio",
+        tabla_staging="staging.metadata_repositorio",
+        columnas=[
+            "codigo_dominio_atributo", "clase", "coleccion_foc", "servidor_foc",
+            "tabla_bv_foc", "nombre_campo_foc", "fecha_aprobada",
+        ],
+        columna_clave="codigo_dominio_atributo",
+        columna_clave_prefijo_dominio=True,
+        # Fecha real de Excel o texto DD/MM/AAAA (respaldo automatico de
+        # excel_reader); el archivo real la trae como texto "21/08/2026".
+        columnas_fecha={"fecha_aprobada": "%Y-%m-%d %H:%M:%S"},
+        columnas_obligatorias=(
+            "codigo_dominio_atributo", "clase", "coleccion_foc", "servidor_foc",
+            "tabla_bv_foc", "nombre_campo_foc", "fecha_aprobada",
+        ),
     ),
     SheetConfig(
         # Investigacion: material de referencia (normativas, procesos,

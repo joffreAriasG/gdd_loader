@@ -153,6 +153,25 @@ carga sigue igual y el problema queda en el log.
 El JSON contiene valores de los registros: la carpeta debe tener acceso solo
 para el equipo de gobierno de datos.
 
+### Plantilla 2.0.0: hoja MetadataRepositorio (v0.7.0)
+
+Desde gdd_loader 0.7.0 la plantilla GDD-DOMINIO vigente es la **2.0.0**:
+
+- `MetadataTecnica` ya no trae `clase` ni las columnas `_foc` (11 columnas).
+- Hoja nueva `MetadataRepositorio` (`codigo_dominio_atributo, clase,
+  coleccion_foc, servidor_foc, tabla_bv_foc, nombre_campo_foc,
+  fecha_aprobada`): una fila por destino de consumo → `staging.metadata_repositorio`
+  → `gdd.atributo_fuente_consumo`. Todas las columnas son obligatorias (ni
+  vacías ni `-`); la hoja puede venir sin filas (se dan de baja los consumos
+  del dominio). `clase` es texto libre; `fecha_aprobada` acepta fecha real de
+  Excel o `DD/MM/AAAA`.
+- `clase` y `fecha_aprobacion` de consumo se actualizan en sitio si cambian
+  (sin versionar); la minuta los muestra como anterior → nuevo.
+- La fuente oficial ya no usa `clase` (ni en la clave natural). La columna
+  `gdd.atributo_fuente_oficial.clase` conserva sus valores históricos.
+- Requiere `db/migraciones/20261005_metadata_repositorio.sql` en cada base.
+  La 1.0.0 se publica como RETIRADA (cambio MAJOR, sin periodo de gracia).
+
 ### Herramientas manuales (diagnóstico / reprocesos)
 
 ```powershell
@@ -165,9 +184,9 @@ python -m gdd_loader.merge_cli --dominio ADS     # solo staging -> gdd
 Ver `db/README.md`. Resumen:
 
 ```powershell
-python -m gdd_loader.plantilla_cli registrar --molde Plantilla_v1.0.0.xlsx --version 1.0.0            # simulación
-python -m gdd_loader.plantilla_cli registrar --molde Plantilla_v1.0.0.xlsx --version 1.0.0 --aplicar  # BORRADOR
-python -m gdd_loader.plantilla_cli publicar --version 1.0.0 --anterior RETIRADA                       # VIGENTE
+python -m gdd_loader.plantilla_cli registrar --molde GDD_Plantilla_v2.0.0.xlsx --version 2.0.0            # simulación
+python -m gdd_loader.plantilla_cli registrar --molde GDD_Plantilla_v2.0.0.xlsx --version 2.0.0 --aplicar --version-loader-minima 0.7.0  # BORRADOR
+python -m gdd_loader.plantilla_cli publicar --version 2.0.0 --anterior RETIRADA                              # VIGENTE
 ```
 
 ## Tests

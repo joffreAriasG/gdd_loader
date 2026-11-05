@@ -183,3 +183,76 @@ def test_plan_remediacion_real_acepta_dd_mm_aaaa_en_todas_sus_fechas(tmp_path):
     assert r["fecha_identificacion"] == datetime.date(2025, 9, 15)
     assert r["fecha_finalizacion_definitiva"] == datetime.date(2026, 1, 30)
     assert r["fecha_ultima_modificacion"] == datetime.date(2026, 3, 15)
+
+
+# --- MetadataRepositorio (plantilla 2.0.0, 2026-10-05) ---------------------
+
+def _cfg_repositorio() -> SheetConfig:
+    from gdd_loader.domain.sheet_config import HOJAS_ADS
+    return next(c for c in HOJAS_ADS if c.nombre_hoja == "MetadataRepositorio")
+
+
+def _fila_repo(**overrides) -> dict:
+    base = {
+        "codigo_dominio_atributo": "AES-1",
+        "clase": "Registro_alianzas_establecimientos",
+        "coleccion_foc": "gob_reg_alianzas_establecimientos",
+        "servidor_foc": "Stratio",
+        "tabla_bv_foc": "ZP_BP_Mdp_Tc_TN_EstablecimientosConsumos",
+        "nombre_campo_foc": "codigoUnicoEstablecimiento",
+        "fecha_aprobada": "21/08/2026",
+    }
+    base.update(overrides)
+    return base
+
+
+def _excel_repo(tmp_path, filas, columnas=None) -> "Path":
+    archivo = tmp_path / "repo.xlsx"
+    df = pd.DataFrame(filas, columns=columnas or list(_fila_repo().keys()))
+    with pd.ExcelWriter(archivo, engine="openpyxl") as writer:
+        df.to_excel(writer, sheet_name="MetadataRepositorio", index=False)
+    return archivo
+
+
+def test_config_real_metadata_tecnica_ya_no_trae_clase_ni_foc():
+    from gdd_loader.domain.sheet_config import HOJAS_ADS
+    cfg = next(c for c in HOJAS_ADS if c.nombre_hoja == "MetadataTecnica")
+    assert "clase" not in cfg.columnas
+    assert not [c for c in cfg.columnas if c.endswith("_foc")]
+    assert len(cfg.columnas) == 11
+
+
+def test_metadata_repositorio_lee_todas_las_columnas_y_parsea_fecha(tmp_path):
+    archivo = _excel_repo(tmp_path, [_fila_repo(), _fila_repo(fecha_aprobada="18/06/2025",
+                                                              nombre_campo_foc="marca")])
+    df = leer_hoja(archivo, _cfg_repositorio())
+    assert list(df.columns) == _cfg_repositorio().columnas
+    assert df["fecha_aprobada"].tolist() == [datetime.date(2026, 8, 21), datetime.date(2025, 6, 18)]
+
+
+@pytest.mark.parametrize("valor", [None, "-", "   "])
+@pytest.mark.parametrize("columna", list(_fila_repo().keys()))
+def test_metadata_repositorio_rechaza_vacio_o_guion_en_cualquier_columna(tmp_path, columna, valor):
+    from gdd_loader.extract.excel_reader import ValoresObligatoriosError
+    archivo = _excel_repo(tmp_path, [_fila_repo(), _fila_repo(**{columna: valor})])
+    with pytest.raises(ValoresObligatoriosError, match=rf"fila 3: {columna}"):
+        leer_hoja(archivo, _cfg_repositorio())
+
+
+def test_metadata_repositorio_fila_toda_guion_es_error(tmp_path):
+    from gdd_loader.extract.excel_reader import ValoresObligatoriosError
+    archivo = _excel_repo(tmp_path, [{k: "-" for k in _fila_repo()}])
+    with pytest.raises(ValoresObligatoriosError, match="fila 2"):
+        leer_hoja(archivo, _cfg_repositorio())
+
+
+def test_metadata_repositorio_sin_filas_es_valida(tmp_path):
+    archivo = _excel_repo(tmp_path, [])
+    df = leer_hoja(archivo, _cfg_repositorio())
+    assert df.empty
+
+
+def test_hojas_sin_columnas_obligatorias_no_cambian(tmp_path):
+    """Las demas hojas siguen aceptando "-" y vacios (sin columnas_obligatorias)."""
+    from gdd_loader.domain.sheet_config import HOJAS_ADS
+    assert [c.nombre_hoja for c in HOJAS_ADS if c.columnas_obligatorias] == ["MetadataRepositorio"]

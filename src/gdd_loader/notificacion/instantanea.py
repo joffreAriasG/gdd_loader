@@ -150,7 +150,7 @@ FUENTES_OFICIALES = EntidadMinuta(
     sql="""
         SELECT a.codigo_atributo, a.nombre_atributo,
                sv.nombre_servidor AS servidor, bd.nombre_bdd AS base_datos,
-               f.nombre_tabla AS tabla, f.clase, f.nombre_campo, f.es_fuente_primaria,
+               f.nombre_tabla AS tabla, f.nombre_campo, f.es_fuente_primaria,
                f.longitud_campo, vv.valor AS tipo_campo, f.acepta_valores_nulos,
                f.formula_calculo, f.lista_valores_validos, f.fecha_aprobacion, f.version
         FROM gdd.atributo_fuente_oficial f
@@ -160,12 +160,13 @@ FUENTES_OFICIALES = EntidadMinuta(
         LEFT JOIN gdd.campo_fuente_valor_valido vv ON vv.id = f.id_campo_fuente_valor_valido
         WHERE a.codigo_dominio = :cod AND a.activo = 1 AND f.activo = 1
     """,
-    clave=("codigo_atributo", "servidor", "base_datos", "tabla", "clase", "nombre_campo",
+    # 2026-10-05 (plantilla 2.0.0): `clase` sale de la fuente oficial (misma
+    # clave natural que carga_gdd._clave_fuente) -- ahora es de consumo.
+    clave=("codigo_atributo", "servidor", "base_datos", "tabla", "nombre_campo",
            "es_fuente_primaria"),
     etiqueta=lambda f: _con(
         f"Atributo {f['codigo_atributo']}",
-        "/".join(p for p in (f["servidor"], f["base_datos"], f["tabla"], f["clase"], f["nombre_campo"])
-                 if p)
+        "/".join(p for p in (f["servidor"], f["base_datos"], f["tabla"], f["nombre_campo"]) if p)
         + (" (primaria)" if f["es_fuente_primaria"] == "Sí" else ""),
     ),
     campos={
@@ -183,7 +184,6 @@ FUENTES_OFICIALES = EntidadMinuta(
         "servidor": "Servidor",
         "base_datos": "Base de datos",
         "tabla": "Tabla / archivo",
-        "clase": "Clase",
         "nombre_campo": "Campo",
         "es_fuente_primaria": "Primaria",
         "tipo_campo": "Tipo de campo",
@@ -192,13 +192,15 @@ FUENTES_OFICIALES = EntidadMinuta(
     },
 )
 
-# Todas sus columnas son clave: solo puede haber altas y bajas.
+# 2026-10-05 (plantilla 2.0.0, hoja MetadataRepositorio): clase y
+# fecha_aprobacion son campos mutables -- la minuta los muestra como
+# "anterior -> nuevo" cuando cambian (el merge los actualiza en sitio).
 FUENTES_CONSUMO = EntidadMinuta(
     nombre="Fuentes de consumo",
     sql="""
         SELECT a.codigo_atributo, a.nombre_atributo,
                sv.nombre_servidor AS servidor, bd.nombre_bdd AS base_datos,
-               t.nombre_tabla AS tabla, c.nombre_campo
+               t.nombre_tabla AS tabla, c.nombre_campo, c.clase, c.fecha_aprobacion
         FROM gdd.atributo_fuente_consumo c
         JOIN gdd.atributo a                ON a.id = c.id_atributo
         JOIN gdd.base_datos_fuente_tabla t ON t.id = c.id_tabla
@@ -211,7 +213,10 @@ FUENTES_CONSUMO = EntidadMinuta(
         f"Atributo {f['codigo_atributo']}",
         "/".join(p for p in (f["servidor"], f["base_datos"], f["tabla"], f["nombre_campo"]) if p),
     ),
-    campos={},
+    campos={
+        "clase": "Clase",
+        "fecha_aprobacion": "Fecha de aprobación",
+    },
     columnas_tabla={
         "codigo_atributo": "Atributo",
         "nombre_atributo": "Nombre del atributo",
@@ -219,6 +224,8 @@ FUENTES_CONSUMO = EntidadMinuta(
         "base_datos": "Base de datos / colección",
         "tabla": "Tabla",
         "nombre_campo": "Campo",
+        "clase": "Clase",
+        "fecha_aprobacion": "Fecha de aprobación",
     },
 )
 

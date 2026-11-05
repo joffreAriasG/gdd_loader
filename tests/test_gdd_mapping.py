@@ -125,9 +125,9 @@ def test_extraer_codigo_falla_con_texto_sin_formato_esperado():
 
 
 def _fila_metadata(**overrides) -> dict:
+    """staging.metadata_tecnica, plantilla 2.0.0: sin clase ni columnas _foc."""
     base = {
         "codigo_dominio_atributo": "ADS-1",
-        "clase": "Ventas",
         "formula_calculo": "-",
         "servidor_fuente_oficial": "Servidor de archivos",
         "base_datos_fuente_oficial": "https://sftpi.example/Inputs/",
@@ -137,42 +137,38 @@ def _fila_metadata(**overrides) -> dict:
         "lista_valores_validos": "-",
         "acepta_valores_nulos": "No",
         "tipo_campo": "VARCHAR",
-        "coleccion_foc": "-",
-        "servidor_foc": "-",
-        "tabla_bv_foc": "-",
-        "nombre_campo_foc": "-",
         "fecha_aprobada": "31-01-2025",
     }
     base.update(overrides)
     return base
 
 
-def test_metadata_sin_datos_foc_genera_una_sola_fuente_primaria():
+def _fila_repositorio(**overrides) -> dict:
+    """staging.metadata_repositorio (2026-10-05)."""
+    base = {
+        "codigo_dominio_atributo": "ADS-1",
+        "clase": "Ventas",
+        "coleccion_foc": "Vista",
+        "servidor_foc": "BI01",
+        "tabla_bv_foc": "VW_VENTAS",
+        "nombre_campo_foc": "ID_PRODUCTO",
+        "fecha_aprobada": datetime.date(2025, 6, 18),
+    }
+    base.update(overrides)
+    return base
+
+
+def test_metadata_genera_una_sola_fuente_primaria():
     resultado = mapear_metadata_tecnica([_fila_metadata()])
     assert len(resultado) == 1
     assert resultado[0].es_fuente_primaria is True
     assert resultado[0].fecha_aprobacion == datetime.date(2025, 1, 31)
 
 
-def test_metadata_con_datos_foc_no_genera_fuente_oficial_secundaria():
-    """Correccion 2026-10-01: las columnas _foc son solo de consumo. Una
-    fila con las 4 columnas _foc informadas genera UNA fuente oficial
-    (la primaria, con datos _oficial) y nada de _foc se filtra en ella."""
-    fila = _fila_metadata(servidor_foc="Stratio", coleccion_foc="ZB_ZN_TN_CAT",
-                          tabla_bv_foc="ZP_BP_Acp_Fin_TD_Articulo", nombre_campo_foc="CAMPOB")
-    [fuente] = mapear_metadata_tecnica([fila])
-    assert fuente.es_fuente_primaria is True
-    assert fuente.servidor_texto == "Servidor de archivos"
-    assert fuente.base_datos_texto == "https://sftpi.example/Inputs/"
-    assert fuente.nombre_campo == "IDMSVPRODUCTO"
-    valores = {str(v) for v in vars(fuente).values()}
-    assert not valores & {"Stratio", "ZB_ZN_TN_CAT", "ZP_BP_Acp_Fin_TD_Articulo", "CAMPOB"}
-
-
-def test_metadata_con_datos_foc_parciales_tampoco_genera_secundaria():
-    for col in ("servidor_foc", "coleccion_foc", "tabla_bv_foc", "nombre_campo_foc"):
-        resultado = mapear_metadata_tecnica([_fila_metadata(**{col: "X"})])
-        assert len(resultado) == 1 and resultado[0].es_fuente_primaria is True
+def test_fuente_oficial_ya_no_tiene_clase():
+    """2026-10-05: clase salio de MetadataTecnica y de la fuente oficial."""
+    [fuente] = mapear_metadata_tecnica([_fila_metadata()])
+    assert not hasattr(fuente, "clase_texto")
 
 
 def test_metadata_mapea_tabla_fuente_oficial_a_nombre_tabla():
@@ -217,83 +213,69 @@ def test_metadata_fecha_aprobada_sigue_aceptando_formato_legacy():
 
 # --- mapear_atributo_fuente_consumo ---
 #
-# Alcance ampliado 2026-09-17, REFACTORIZADO 2026-09-18: columnas _foc de
-# metadata_tecnica, ahora resueltas contra catalogos controlados (ver
-# pipeline/carga_gdd.py y load/gdd_repository.py) en vez de guardarse como
-# texto libre. Confirmado con el usuario: la cardinalidad es directa con el
-# ATRIBUTO (se agrupa/deduplica), no una fila por cada fila de staging como
-# fuente_oficial. coleccion_foc paso de OPCIONAL a OBLIGATORIA -- resuelve la
-# coleccion/base de datos destino, ya no es solo descriptiva.
+# Desde 2026-10-05 (plantilla 2.0.0) lee staging.metadata_repositorio: una
+# fila por destino de consumo, todas las columnas obligatorias, con clase y
+# fecha_aprobada propias. coleccion_foc/tabla_bv_foc se resuelven contra
+# catalogos controlados (ver pipeline/carga_gdd.py).
 
 
-def test_consumo_sin_datos_foc_no_genera_filas():
-    resultado = mapear_atributo_fuente_consumo([_fila_metadata()])
-    assert resultado == []
+def test_consumo_sin_filas_no_genera_nada():
+    assert mapear_atributo_fuente_consumo([]) == []
 
 
-def test_consumo_requiere_las_4_columnas_foc_juntas():
-    """Sin servidor_foc, coleccion_foc, tabla_bv_foc Y nombre_campo_foc juntos no
-    hay destino de consumo identificable -- se omite en vez de insertar una
-    fila a medias. coleccion_foc (REFACTOR 2026-09-18) ahora es tan obligatoria
-    como las otras 3, porque resuelve la coleccion/base de datos destino."""
-    assert mapear_atributo_fuente_consumo([_fila_metadata(coleccion_foc="Vista")]) == []
-    fila_sin_clase = _fila_metadata(
-        servidor_foc="BI01", tabla_bv_foc="VW_VENTAS", nombre_campo_foc="ID_PRODUCTO"
-    )
-    assert mapear_atributo_fuente_consumo([fila_sin_clase]) == []
+@pytest.mark.parametrize("columna", ["servidor_foc", "coleccion_foc", "tabla_bv_foc", "nombre_campo_foc"])
+@pytest.mark.parametrize("valor", ["-", None, ""])
+def test_consumo_columna_destino_vacia_es_error(columna, valor):
+    """Todas las columnas de MetadataRepositorio son obligatorias -- una fila
+    a medias ya no se omite en silencio."""
+    with pytest.raises(ValueError, match="obligatorios"):
+        mapear_atributo_fuente_consumo([_fila_repositorio(**{columna: valor})])
 
 
-def test_consumo_con_las_4_columnas_foc_genera_una_fila():
-    fila = _fila_metadata(
-        coleccion_foc="Vista", servidor_foc="BI01", tabla_bv_foc="VW_VENTAS", nombre_campo_foc="ID_PRODUCTO"
-    )
-    [resultado] = mapear_atributo_fuente_consumo([fila])
+def test_consumo_genera_una_fila_con_clase_y_fecha():
+    [resultado] = mapear_atributo_fuente_consumo([_fila_repositorio()])
     assert resultado.codigo_dominio_atributo == "ADS-1"
+    assert resultado.codigo_dominio == "ADS" and resultado.codigo_atributo == 1
     assert resultado.servidor_texto == "BI01"
     assert resultado.coleccion_texto == "Vista"
     assert resultado.nombre_tabla == "VW_VENTAS"
     assert resultado.nombre_campo == "ID_PRODUCTO"
+    assert resultado.clase == "Ventas"
+    assert resultado.fecha_aprobacion == datetime.date(2025, 6, 18)
+
+
+def test_consumo_fecha_en_texto_tambien_se_acepta():
+    [resultado] = mapear_atributo_fuente_consumo([_fila_repositorio(fecha_aprobada="21/08/2026")])
+    assert resultado.fecha_aprobacion == datetime.date(2026, 8, 21)
 
 
 def test_consumo_agrupa_varias_filas_del_mismo_atributo():
-    """La plantilla puede repetir codigo_dominio_atributo en varias filas
-    cuando un atributo tiene mas de un destino de consumo -- confirmado con
-    el usuario. Cada destino distinto produce su propia fila."""
     filas = [
-        _fila_metadata(
-            codigo_dominio_atributo="ADS-1", coleccion_foc="Vista",
-            servidor_foc="BI01", tabla_bv_foc="VW_VENTAS", nombre_campo_foc="ID_PRODUCTO",
-        ),
-        _fila_metadata(
-            codigo_dominio_atributo="ADS-1", coleccion_foc="Vista",
-            servidor_foc="BI02", tabla_bv_foc="VW_REPORTES", nombre_campo_foc="COD_PRODUCTO",
-        ),
+        _fila_repositorio(servidor_foc="BI01", tabla_bv_foc="VW_VENTAS", nombre_campo_foc="ID_PRODUCTO"),
+        _fila_repositorio(servidor_foc="BI02", tabla_bv_foc="VW_REPORTES", nombre_campo_foc="COD_PRODUCTO"),
     ]
     resultado = mapear_atributo_fuente_consumo(filas)
     assert len(resultado) == 2
     assert {r.servidor_texto for r in resultado} == {"BI01", "BI02"}
 
 
-def test_consumo_deduplica_mismo_destino_repetido():
-    """Mismo (atributo, servidor, clase, tabla, campo) repetido -- se
-    colapsa en una sola fila, no se duplica."""
-    filas = [
-        _fila_metadata(coleccion_foc="Vista", servidor_foc="BI01", tabla_bv_foc="VW_VENTAS", nombre_campo_foc="ID_PRODUCTO"),
-        _fila_metadata(coleccion_foc="Vista", servidor_foc="BI01", tabla_bv_foc="VW_VENTAS", nombre_campo_foc="ID_PRODUCTO"),
-    ]
-    resultado = mapear_atributo_fuente_consumo(filas)
+def test_consumo_duplicado_exacto_se_toma_una_vez():
+    resultado = mapear_atributo_fuente_consumo([_fila_repositorio(), _fila_repositorio()])
     assert len(resultado) == 1
 
 
-def test_consumo_distinta_clase_no_colapsa():
-    """REFACTOR 2026-09-18: coleccion_foc ahora es parte de la clave de
-    agrupacion (resuelve la coleccion/bdd destino) -- el mismo servidor/
-    tabla/campo con coleccion_foc distinta son destinos DISTINTOS, a diferencia
-    del diseno anterior donde clase era solo descriptiva y no colapsaba."""
-    filas = [
-        _fila_metadata(coleccion_foc="Vista", servidor_foc="BI01", tabla_bv_foc="VW_VENTAS", nombre_campo_foc="ID_PRODUCTO"),
-        _fila_metadata(coleccion_foc="Tabla", servidor_foc="BI01", tabla_bv_foc="VW_VENTAS", nombre_campo_foc="ID_PRODUCTO"),
-    ]
+def test_consumo_mismo_destino_con_clase_distinta_es_error():
+    """El caso del archivo real (AES-1 codigoUnicoEstablecimiento con dos
+    clases): si se repite el destino con otra clase o fecha, es ambiguo."""
+    with pytest.raises(ValueError, match="mas de una vez"):
+        mapear_atributo_fuente_consumo([
+            _fila_repositorio(clase="Registro alianzas y establecimientos"),
+            _fila_repositorio(clase="Registro_alianzas_establecimientos"),
+        ])
+
+
+def test_consumo_distinta_coleccion_no_colapsa():
+    filas = [_fila_repositorio(coleccion_foc="Vista"), _fila_repositorio(coleccion_foc="Tabla")]
     resultado = mapear_atributo_fuente_consumo(filas)
     assert len(resultado) == 2
     assert {r.coleccion_texto for r in resultado} == {"Vista", "Tabla"}
@@ -303,14 +285,8 @@ def test_consumo_no_colapsa_atributos_distintos_con_mismo_destino():
     """El mismo servidor/clase/tabla/campo para atributos DISTINTOS son
     destinos de consumo distintos (la clave incluye el atributo)."""
     filas = [
-        _fila_metadata(
-            codigo_dominio_atributo="ADS-1", coleccion_foc="Vista",
-            servidor_foc="BI01", tabla_bv_foc="VW_VENTAS", nombre_campo_foc="ID_PRODUCTO",
-        ),
-        _fila_metadata(
-            codigo_dominio_atributo="ADS-2", coleccion_foc="Vista",
-            servidor_foc="BI01", tabla_bv_foc="VW_VENTAS", nombre_campo_foc="ID_PRODUCTO",
-        ),
+        _fila_repositorio(codigo_dominio_atributo="ADS-1"),
+        _fila_repositorio(codigo_dominio_atributo="ADS-2"),
     ]
     resultado = mapear_atributo_fuente_consumo(filas)
     assert len(resultado) == 2

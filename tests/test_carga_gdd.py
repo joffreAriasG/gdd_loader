@@ -255,9 +255,10 @@ def test_siguiente_version(version_actual, version_esperada):
 
 
 def _fila_metadata(**overrides) -> dict:
+    """Fila de staging.metadata_tecnica, plantilla 2.0.0 (2026-10-05): sin
+    `clase` ni columnas "_foc" (pasaron a MetadataRepositorio)."""
     base = {
         "codigo_dominio_atributo": "ADS-1",
-        "clase": "Ventas",
         "servidor_fuente_oficial": "Servidor de archivos",
         "base_datos_fuente_oficial": "BDD_A",
         "tabla_fuente_oficial": "-",
@@ -267,14 +268,52 @@ def _fila_metadata(**overrides) -> dict:
         "acepta_valores_nulos": "No",
         "tipo_campo": "VARCHAR",
         "formula_calculo": "-",
-        "coleccion_foc": "-",
-        "servidor_foc": "-",
-        "tabla_bv_foc": "-",
-        "nombre_campo_foc": "-",
         "fecha_aprobada": "31-01-2025",
     }
     base.update(overrides)
     return base
+
+
+def _fila_repositorio(**overrides) -> dict:
+    """Fila de staging.metadata_repositorio (2026-10-05): un destino de
+    consumo por fila; fecha_aprobada ya llega como date (la parsea el lector)."""
+    base = {
+        "codigo_dominio_atributo": "ADS-1",
+        "clase": "Ventas",
+        "coleccion_foc": "BDD_VENTAS",
+        "servidor_foc": "BI01",
+        "tabla_bv_foc": "VW_VENTAS",
+        "nombre_campo_foc": "ID_PRODUCTO",
+        "fecha_aprobada": datetime.date(2025, 6, 18),
+    }
+    base.update(overrides)
+    return base
+
+
+def _staging(metadata=(), repositorio=()):
+    """staging_repo simulado: leer_por_prefijo devuelve filas segun la tabla."""
+    staging_repo = MagicMock()
+    staging_repo.leer.return_value = [_fila_detalle()]
+    tablas = {
+        "staging.metadata_tecnica": list(metadata),
+        "staging.metadata_repositorio": list(repositorio),
+    }
+    staging_repo.leer_por_prefijo.side_effect = lambda tabla, *a, **k: tablas[tabla]
+    return staging_repo
+
+
+_ATRIBUTO_EXISTENTE = {("ADS", 1): ExistenteVersionado(id=42, fecha_aprobacion=datetime.date(2025, 1, 31))}
+
+
+def test_merge_lee_consumo_de_metadata_repositorio(monkeypatch):
+    staging_repo = _staging()
+    _parchear_repo_gdd(monkeypatch)
+
+    resultado = carga_gdd.ejecutar_merge_dominio(MagicMock(), staging_repo, "ADS")
+
+    assert resultado.ok, resultado.error
+    tablas_leidas = [c.args[0] for c in staging_repo.leer_por_prefijo.call_args_list]
+    assert tablas_leidas == ["staging.metadata_tecnica", "staging.metadata_repositorio"]
 
 
 def test_fuente_sin_cambios_reales_no_actualiza_ni_loguea(monkeypatch):
@@ -282,26 +321,22 @@ def test_fuente_sin_cambios_reales_no_actualiza_ni_loguea(monkeypatch):
     misma fecha_aprobacion Y mismos valores no debe generar UPDATE ni
     linea de bitacora para la fuente.
     """
-    staging_repo = MagicMock()
-    staging_repo.leer.return_value = [_fila_detalle()]
-    staging_repo.leer_por_prefijo.return_value = [_fila_metadata()]
-
-    existentes_atributo = {("ADS", 1): ExistenteVersionado(id=42, fecha_aprobacion=datetime.date(2025, 1, 31))}
-    mock_repo = _parchear_repo_gdd(monkeypatch, existentes_atributo=existentes_atributo)
+    staging_repo = _staging(metadata=[_fila_metadata()])
+    mock_repo = _parchear_repo_gdd(monkeypatch, existentes_atributo=_ATRIBUTO_EXISTENTE)
     mock_repo.resolver_o_crear_servidor.return_value = 1
     mock_repo.resolver_o_crear_bdd.return_value = 10
 
-    clave_fuente = ("Ventas", "CAMPO_A", 10, True, "")
+    # Clave sin clase (2026-10-05): (nombre_campo, id_bdd, es_fuente_primaria, nombre_tabla)
+    clave_fuente = ("CAMPO_A", 10, True, "")
     mock_repo.fuente_oficial_existentes.return_value = {
         clave_fuente: ExistenteVersionado(id=77, fecha_aprobacion=datetime.date(2025, 1, 31))
     }
 
-    campos_fijos = {"nombre_campo": "CAMPO_A", "clase": "Ventas"}
+    campos_fijos = {"nombre_campo": "CAMPO_A"}
     monkeypatch.setattr(carga_gdd, "_resolver_campos_fuente", lambda *a, **k: dict(campos_fijos))
     mock_repo.campos_actuales.return_value = dict(campos_fijos)
-    engine = MagicMock()
 
-    resultado = carga_gdd.ejecutar_merge_dominio(engine, staging_repo, "ADS")
+    resultado = carga_gdd.ejecutar_merge_dominio(MagicMock(), staging_repo, "ADS")
 
     assert resultado.ok, resultado.error
     assert resultado.fuentes_actualizadas == 0
@@ -314,32 +349,40 @@ def test_fuente_sin_cambios_reales_no_actualiza_ni_loguea(monkeypatch):
     assert llamadas_fuente == []
 
 
-def test_fuentes_con_misma_clase_pero_distinto_campo_no_se_colapsan(monkeypatch):
+def test_fuente_oficial_ya_no_escribe_clase(monkeypatch):
+    """2026-10-05: `clase` salio de MetadataTecnica -- la fuente oficial no la
+    escribe (la columna en gdd conserva sus valores historicos)."""
+    staging_repo = _staging(metadata=[_fila_metadata()])
+    mock_repo = _parchear_repo_gdd(monkeypatch)
+    mock_repo.resolver_o_crear_servidor.return_value = 1
+    mock_repo.resolver_o_crear_bdd.return_value = 10
+
+    resultado = carga_gdd.ejecutar_merge_dominio(MagicMock(), staging_repo, "ADS")
+
+    assert resultado.ok, resultado.error
+    campos = mock_repo.insertar_fuente_oficial.call_args.args[1]
+    assert "clase" not in campos
+
+
+def test_fuentes_con_distinto_campo_no_se_colapsan(monkeypatch):
     """Regresion del bug real: (clase, es_fuente_primaria) como clave
-    natural colapsaba filas de metadata_tecnica que comparten `clase` pero
-    vienen de sistemas/campos fuente distintos (confirmado: 210 filas
-    reales de ADS colapsaban a 94). La clave correcta incluye tambien
-    nombre_campo e id_bdd.
+    natural colapsaba filas de metadata_tecnica de sistemas/campos fuente
+    distintos (confirmado: 210 filas reales de ADS colapsaban a 94). La clave
+    usa nombre_campo e id_bdd.
     """
-    staging_repo = MagicMock()
-    staging_repo.leer.return_value = [_fila_detalle()]
-    staging_repo.leer_por_prefijo.return_value = [
+    staging_repo = _staging(metadata=[
         _fila_metadata(nombre_campo_fuente_oficial="CAMPO_A", base_datos_fuente_oficial="BDD_A"),
         _fila_metadata(nombre_campo_fuente_oficial="CAMPO_B", base_datos_fuente_oficial="BDD_B"),
-    ]
+    ])
     mock_repo = _parchear_repo_gdd(monkeypatch, id_dominio=99)
     mock_repo.resolver_o_crear_servidor.return_value = 1
     mock_repo.resolver_o_crear_bdd.side_effect = [10, 20]
-    engine = MagicMock()
 
-    resultado = carga_gdd.ejecutar_merge_dominio(engine, staging_repo, "ADS")
+    resultado = carga_gdd.ejecutar_merge_dominio(MagicMock(), staging_repo, "ADS")
 
     assert resultado.ok, resultado.error
-    # Antes del fix, esto daba 1 (la segunda fila pisaba a la primera en el dict).
     assert resultado.fuentes_insertadas == 2
     assert mock_repo.insertar_fuente_oficial.call_count == 2
-    # Una linea de bitacora por cada fuente insertada (mas la del atributo
-    # en si, que tambien se inserta nuevo en este escenario).
     llamadas_fuente = [
         c for c in mock_repo.registrar_bitacora.call_args_list
         if c.args[1] == "atributo_fuente_oficial"
@@ -351,19 +394,16 @@ def test_fuentes_con_misma_clase_pero_distinto_campo_no_se_colapsan(monkeypatch)
 def test_fuentes_con_misma_clave_anterior_pero_distinta_tabla_no_se_colapsan(monkeypatch):
     """Regresion 2026-10-01 (datos reales: category_id de Catalogo_compras en
     PROD1 venia de 3 tablas distintas y quedaba 1 sola fuente): mismo
-    servidor, base, clase y campo, distinta tabla_fuente_oficial -> 3 fuentes,
+    servidor, base y campo, distinta tabla_fuente_oficial -> 3 fuentes,
     cada una con su nombre_tabla."""
-    staging_repo = MagicMock()
-    staging_repo.leer.return_value = [_fila_detalle()]
-    staging_repo.leer_por_prefijo.return_value = [
+    staging_repo = _staging(metadata=[
         _fila_metadata(tabla_fuente_oficial=t) for t in ("MTL_CATEGORIES", "MTL_ITEM_CATEGORIES", "PO_LINES")
-    ]
+    ])
     mock_repo = _parchear_repo_gdd(monkeypatch, id_dominio=99)
     mock_repo.resolver_o_crear_servidor.return_value = 1
     mock_repo.resolver_o_crear_bdd.return_value = 10
-    engine = MagicMock()
 
-    resultado = carga_gdd.ejecutar_merge_dominio(engine, staging_repo, "ADS")
+    resultado = carga_gdd.ejecutar_merge_dominio(MagicMock(), staging_repo, "ADS")
 
     assert resultado.ok, resultado.error
     assert resultado.fuentes_insertadas == 3
@@ -371,39 +411,66 @@ def test_fuentes_con_misma_clave_anterior_pero_distinta_tabla_no_se_colapsan(mon
     assert sorted(tablas) == ["MTL_CATEGORIES", "MTL_ITEM_CATEGORIES", "PO_LINES"]
 
 
+def test_fuente_duplicada_exacta_se_toma_una_vez(monkeypatch):
+    """Sin clase en la clave, dos filas que antes solo diferian por clase son
+    la misma fuente; si el resto es igual, se inserta una sola vez."""
+    staging_repo = _staging(metadata=[_fila_metadata(), _fila_metadata()])
+    mock_repo = _parchear_repo_gdd(monkeypatch)
+    mock_repo.resolver_o_crear_servidor.return_value = 1
+    mock_repo.resolver_o_crear_bdd.return_value = 10
+
+    resultado = carga_gdd.ejecutar_merge_dominio(MagicMock(), staging_repo, "ADS")
+
+    assert resultado.ok, resultado.error
+    assert resultado.fuentes_insertadas == 1
+
+
+def test_fuente_duplicada_con_valores_distintos_aborta_el_dominio(monkeypatch):
+    """Caso atributo 349 (Facturacion/Catalogo): misma fuente con fechas
+    distintas -> ambiguo, se rechaza en vez de quedarse con la ultima."""
+    staging_repo = _staging(metadata=[
+        _fila_metadata(fecha_aprobada="31-01-2025"),
+        _fila_metadata(fecha_aprobada="18-06-2025"),
+    ])
+    mock_repo = _parchear_repo_gdd(monkeypatch)
+    mock_repo.resolver_o_crear_servidor.return_value = 1
+    mock_repo.resolver_o_crear_bdd.return_value = 10
+
+    resultado = carga_gdd.ejecutar_merge_dominio(MagicMock(), staging_repo, "ADS")
+
+    assert not resultado.ok
+    assert "mas de una vez" in resultado.error
+    mock_repo.insertar_fuente_oficial.assert_not_called()
+
+
 def test_fuente_existente_con_misma_tabla_se_actualiza_no_se_reinserta(monkeypatch):
-    staging_repo = MagicMock()
-    staging_repo.leer.return_value = [_fila_detalle()]
-    staging_repo.leer_por_prefijo.return_value = [_fila_metadata(tabla_fuente_oficial="PO_LINES")]
-    existentes_atributo = {("ADS", 1): ExistenteVersionado(id=42, fecha_aprobacion=datetime.date(2025, 1, 31))}
-    mock_repo = _parchear_repo_gdd(monkeypatch, existentes_atributo=existentes_atributo)
+    staging_repo = _staging(metadata=[_fila_metadata(tabla_fuente_oficial="PO_LINES")])
+    mock_repo = _parchear_repo_gdd(monkeypatch, existentes_atributo=_ATRIBUTO_EXISTENTE)
     mock_repo.resolver_o_crear_servidor.return_value = 1
     mock_repo.resolver_o_crear_bdd.return_value = 10
     mock_repo.fuente_oficial_existentes.return_value = {
-        ("Ventas", "CAMPO_A", 10, True, "PO_LINES"): ExistenteVersionado(
+        ("CAMPO_A", 10, True, "PO_LINES"): ExistenteVersionado(
             id=77, fecha_aprobacion=datetime.date(2025, 1, 31))
     }
     mock_repo.campos_actuales.return_value = {}
-    engine = MagicMock()
 
-    resultado = carga_gdd.ejecutar_merge_dominio(engine, staging_repo, "ADS")
+    resultado = carga_gdd.ejecutar_merge_dominio(MagicMock(), staging_repo, "ADS")
 
     assert resultado.ok, resultado.error
     assert resultado.fuentes_insertadas == 0 and resultado.fuentes_eliminadas == 0
     mock_repo.insertar_fuente_oficial.assert_not_called()
 
 
-
-def test_columnas_foc_van_solo_a_consumo_no_a_fuente_oficial(monkeypatch):
-    """Correccion 2026-10-01: con las 4 columnas _foc informadas se inserta
-    UNA fuente oficial (la primaria, con datos _oficial) y UN consumo
-    (resuelto contra los catalogos controlados). Ningun valor _foc pasa por
-    el get-or-create de servidor/base de datos de la fuente oficial."""
-    staging_repo = MagicMock()
-    staging_repo.leer.return_value = [_fila_detalle()]
-    staging_repo.leer_por_prefijo.return_value = [_fila_metadata(
-        servidor_foc="Stratio", coleccion_foc="ZB_ZN_TN_CAT",
-        tabla_bv_foc="ZP_BP_Acp_Fin_TD_Articulo", nombre_campo_foc="COD_ARTICULO")]
+def test_fuente_oficial_y_consumo_salen_de_hojas_distintas(monkeypatch):
+    """2026-10-05: la fuente oficial sale de MetadataTecnica y el consumo de
+    MetadataRepositorio. Ningun valor de consumo pasa por el get-or-create de
+    servidor/base de datos de la fuente oficial."""
+    staging_repo = _staging(
+        metadata=[_fila_metadata()],
+        repositorio=[_fila_repositorio(
+            servidor_foc="Stratio", coleccion_foc="ZB_ZN_TN_CAT",
+            tabla_bv_foc="ZP_BP_Acp_Fin_TD_Articulo", nombre_campo_foc="COD_ARTICULO")],
+    )
     mock_repo = _parchear_repo_gdd(monkeypatch)
     mock_repo.resolver_o_crear_servidor.side_effect = lambda conn, nombre: {"Servidor de archivos": 1, "Stratio": 2}[nombre]
     mock_repo.resolver_o_crear_bdd.return_value = 10
@@ -415,7 +482,6 @@ def test_columnas_foc_van_solo_a_consumo_no_a_fuente_oficial(monkeypatch):
     [insercion] = mock_repo.insertar_fuente_oficial.call_args_list
     assert insercion.args[1]["es_fuente_primaria"] is True
     assert insercion.args[1]["nombre_campo"] == "CAMPO_A"
-    # base de datos de la fuente oficial: solo la _oficial, nunca tabla_bv_foc
     assert [c.args[2] for c in mock_repo.resolver_o_crear_bdd.call_args_list] == ["BDD_A"]
     mock_repo.resolver_bdd_controlado.assert_called_once()
     assert mock_repo.resolver_bdd_controlado.call_args.args[1:] == (2, "ZB_ZN_TN_CAT")
@@ -425,17 +491,14 @@ def test_columnas_foc_van_solo_a_consumo_no_a_fuente_oficial(monkeypatch):
 def test_fuente_secundaria_foc_existente_se_da_de_baja(monkeypatch):
     """Una fuente secundaria (es_fuente_primaria=0) que quedo de la logica
     anterior ya no viene del Excel -> ELIMINAR (baja logica) en la carga."""
-    staging_repo = MagicMock()
-    staging_repo.leer.return_value = [_fila_detalle()]
-    staging_repo.leer_por_prefijo.return_value = [_fila_metadata()]
-    existentes_atributo = {("ADS", 1): ExistenteVersionado(id=42, fecha_aprobacion=datetime.date(2025, 1, 31))}
-    mock_repo = _parchear_repo_gdd(monkeypatch, existentes_atributo=existentes_atributo)
+    staging_repo = _staging(metadata=[_fila_metadata()])
+    mock_repo = _parchear_repo_gdd(monkeypatch, existentes_atributo=_ATRIBUTO_EXISTENTE)
     mock_repo.resolver_o_crear_servidor.return_value = 1
     mock_repo.resolver_o_crear_bdd.return_value = 10
     mock_repo.campos_actuales.return_value = {}
     mock_repo.fuente_oficial_existentes.return_value = {
-        ("Ventas", "CAMPO_A", 10, True, ""): ExistenteVersionado(id=77, fecha_aprobacion=datetime.date(2025, 1, 31)),
-        ("ZB_ZN_TN_CAT", "COD_ARTICULO", 34, False, ""): ExistenteVersionado(
+        ("CAMPO_A", 10, True, ""): ExistenteVersionado(id=77, fecha_aprobacion=datetime.date(2025, 1, 31)),
+        ("COD_ARTICULO", 34, False, ""): ExistenteVersionado(
             id=88, fecha_aprobacion=datetime.date(2025, 1, 31)),
     }
 
@@ -446,44 +509,31 @@ def test_fuente_secundaria_foc_existente_se_da_de_baja(monkeypatch):
     mock_repo.eliminar_fuente_oficial.assert_called_once_with(mock_repo.eliminar_fuente_oficial.call_args.args[0], 88)
     mock_repo.insertar_fuente_oficial.assert_not_called()
 
-# --- atributo_fuente_consumo (2026-09-17, alcance ampliado; REFACTORIZADA
-# 2026-09-18, dos vueltas -- ver nota de modulo de carga_gdd.py) ---
+# --- atributo_fuente_consumo (2026-09-17; REFACTORIZADA 2026-09-18; fuente
+# MetadataRepositorio con clase/fecha_aprobacion desde 2026-10-05) ---
 #
 # Se mergea DENTRO de ejecutar_merge_dominio (misma transaccion que
 # atributo/fuente_oficial). coleccion_foc/tabla_bv_foc se resuelven SIEMPRE
-# contra catalogos controlados (resolver_bdd_controlado/
-# resolver_tabla_controlada), sin excepcion de texto libre; id_servidor NO
-# se guarda (se alcanza via base_datos_fuente.id_servidor, igual que
-# atributo_fuente_oficial).
+# contra catalogos controlados; id_servidor NO se guarda. clase y
+# fecha_aprobacion son mutables: UPDATE en sitio si cambian.
 
 
-def test_consumo_sin_datos_foc_no_genera_operaciones(monkeypatch):
-    staging_repo = MagicMock()
-    staging_repo.leer.return_value = [_fila_detalle()]
-    staging_repo.leer_por_prefijo.return_value = [_fila_metadata()]  # FOC = "-"
+def test_consumo_hoja_vacia_no_genera_operaciones(monkeypatch):
+    staging_repo = _staging(repositorio=[])
     mock_repo = _parchear_repo_gdd(monkeypatch)
-    engine = MagicMock()
 
-    resultado = carga_gdd.ejecutar_merge_dominio(engine, staging_repo, "ADS")
+    resultado = carga_gdd.ejecutar_merge_dominio(MagicMock(), staging_repo, "ADS")
 
     assert resultado.ok, resultado.error
     assert resultado.consumos_insertados == 0
     mock_repo.insertar_atributo_fuente_consumo.assert_not_called()
 
 
-def test_consumo_nuevo_resuelve_bdd_y_tabla_controladas(monkeypatch):
-    """tabla_bv_foc se resuelve SIEMPRE contra gdd.base_datos_fuente_tabla
-    (REFACTOR 2026-09-18, segunda vuelta) -- sin excepcion por tipo. El
+def test_consumo_nuevo_resuelve_bdd_y_tabla_controladas_con_clase_y_fecha(monkeypatch):
+    """tabla_bv_foc se resuelve SIEMPRE contra gdd.base_datos_fuente_tabla. El
     servidor se resuelve solo como paso intermedio y NO aparece en los
-    campos a insertar."""
-    staging_repo = MagicMock()
-    staging_repo.leer.return_value = [_fila_detalle()]
-    staging_repo.leer_por_prefijo.return_value = [
-        _fila_metadata(
-            coleccion_foc="BDD_VENTAS", servidor_foc="BI01", tabla_bv_foc="VW_VENTAS",
-            nombre_campo_foc="ID_PRODUCTO",
-        )
-    ]
+    campos a insertar. clase y fecha_aprobacion (2026-10-05) si."""
+    staging_repo = _staging(repositorio=[_fila_repositorio()])
     mock_repo = _parchear_repo_gdd(monkeypatch)
     mock_repo.resolver_o_crear_servidor.return_value = 5
     mock_repo.resolver_bdd_controlado.return_value = 10
@@ -499,12 +549,10 @@ def test_consumo_nuevo_resuelve_bdd_y_tabla_controladas(monkeypatch):
     mock_repo.resolver_bdd_controlado.assert_called_once_with(conn_usada, 5, "BDD_VENTAS")
     mock_repo.resolver_tabla_controlada.assert_called_once_with(conn_usada, 10, "VW_VENTAS")
     campos = mock_repo.insertar_atributo_fuente_consumo.call_args.args[1]
-    assert campos["id_bdd"] == 10
-    assert campos["id_tabla"] == 300
-    assert campos["nombre_campo"] == "ID_PRODUCTO"
-    assert "id_servidor" not in campos
-    assert "nombre_tabla_libre" not in campos
-    # Sin bitacora para esta tabla (decision explicita, igual que plan_remediacion).
+    assert campos == {
+        "id_atributo": 555, "id_bdd": 10, "id_tabla": 300, "nombre_campo": "ID_PRODUCTO",
+        "clase": "Ventas", "fecha_aprobacion": datetime.date(2025, 6, 18),
+    }
     llamadas_consumo = [
         c for c in mock_repo.registrar_bitacora.call_args_list
         if c.args[1] == "atributo_fuente_consumo"
@@ -513,92 +561,82 @@ def test_consumo_nuevo_resuelve_bdd_y_tabla_controladas(monkeypatch):
 
 
 def test_consumo_coleccion_foc_no_encontrada_aborta_el_dominio(monkeypatch):
-    """coleccion_foc es un catalogo CONTROLADO -- si no calza con ninguna fila
-    de gdd.base_datos_fuente, se aborta el dominio completo, igual que
-    cualquier CatalogoNoEncontradoError."""
-    staging_repo = MagicMock()
-    staging_repo.leer.return_value = [_fila_detalle()]
-    staging_repo.leer_por_prefijo.return_value = [
-        _fila_metadata(
-            coleccion_foc="NO_EXISTE", servidor_foc="BI01", tabla_bv_foc="VW_VENTAS",
-            nombre_campo_foc="ID_PRODUCTO",
-        )
-    ]
+    staging_repo = _staging(repositorio=[_fila_repositorio(coleccion_foc="NO_EXISTE")])
     mock_repo = _parchear_repo_gdd(monkeypatch)
     mock_repo.resolver_bdd_controlado.side_effect = CatalogoNoEncontradoError("no existe")
-    engine = MagicMock()
 
-    resultado = carga_gdd.ejecutar_merge_dominio(engine, staging_repo, "ADS")
+    resultado = carga_gdd.ejecutar_merge_dominio(MagicMock(), staging_repo, "ADS")
 
     assert not resultado.ok
     assert "no existe" in resultado.error
 
 
 def test_consumo_tabla_bv_foc_no_encontrada_aborta_el_dominio(monkeypatch):
-    """tabla_bv_foc tambien es un catalogo CONTROLADO (REFACTOR 2026-09-18,
-    segunda vuelta) -- si no calza con ninguna fila de
-    gdd.base_datos_fuente_tabla, se aborta el dominio, igual que
-    coleccion_foc."""
-    staging_repo = MagicMock()
-    staging_repo.leer.return_value = [_fila_detalle()]
-    staging_repo.leer_por_prefijo.return_value = [
-        _fila_metadata(
-            coleccion_foc="BDD_VENTAS", servidor_foc="BI01", tabla_bv_foc="NO_EXISTE",
-            nombre_campo_foc="ID_PRODUCTO",
-        )
-    ]
+    staging_repo = _staging(repositorio=[_fila_repositorio(tabla_bv_foc="NO_EXISTE")])
     mock_repo = _parchear_repo_gdd(monkeypatch)
     mock_repo.resolver_tabla_controlada.side_effect = CatalogoNoEncontradoError("no existe")
-    engine = MagicMock()
 
-    resultado = carga_gdd.ejecutar_merge_dominio(engine, staging_repo, "ADS")
+    resultado = carga_gdd.ejecutar_merge_dominio(MagicMock(), staging_repo, "ADS")
 
     assert not resultado.ok
     assert "no existe" in resultado.error
 
 
-def test_consumo_existente_con_misma_clave_no_genera_insert(monkeypatch):
-    """Ya no quedan campos mutables: si la clave natural completa (id_bdd,
-    id_tabla, nombre_campo) ya existe, se cuenta como sin_cambios sin
-    insertar de nuevo."""
-    staging_repo = MagicMock()
-    staging_repo.leer.return_value = [_fila_detalle()]
-    staging_repo.leer_por_prefijo.return_value = [
-        _fila_metadata(
-            coleccion_foc="BDD_VENTAS", servidor_foc="BI01", tabla_bv_foc="VW_VENTAS",
-            nombre_campo_foc="ID_PRODUCTO",
-        )
-    ]
+def test_consumo_existente_sin_cambios_no_actualiza(monkeypatch):
+    staging_repo = _staging(repositorio=[_fila_repositorio()])
     mock_repo = _parchear_repo_gdd(monkeypatch)
     mock_repo.resolver_bdd_controlado.return_value = 10
     mock_repo.resolver_tabla_controlada.return_value = 300
     mock_repo.consumo_existentes.return_value = {
         (10, 300, "ID_PRODUCTO"): ExistenteVersionado(id=88, fecha_aprobacion=None)
     }
-    engine = MagicMock()
+    mock_repo.campos_actuales.return_value = {"clase": "Ventas", "fecha_aprobacion": datetime.date(2025, 6, 18)}
 
-    resultado = carga_gdd.ejecutar_merge_dominio(engine, staging_repo, "ADS")
+    resultado = carga_gdd.ejecutar_merge_dominio(MagicMock(), staging_repo, "ADS")
 
     assert resultado.ok, resultado.error
     assert resultado.consumos_sin_cambios == 1
     assert resultado.consumos_actualizados == 0
     mock_repo.insertar_atributo_fuente_consumo.assert_not_called()
+    mock_repo.actualizar_atributo_fuente_consumo.assert_not_called()
+
+
+def test_consumo_existente_con_otra_clase_o_fecha_se_actualiza_en_sitio(monkeypatch):
+    """Decision 2026-10-05: si cambian clase o fecha_aprobacion, UPDATE de la
+    misma fila (mismo id), sin versionar ni bitacora."""
+    staging_repo = _staging(repositorio=[_fila_repositorio(
+        clase="Registro_alianzas_establecimientos", fecha_aprobada=datetime.date(2026, 8, 21))])
+    mock_repo = _parchear_repo_gdd(monkeypatch)
+    mock_repo.resolver_bdd_controlado.return_value = 10
+    mock_repo.resolver_tabla_controlada.return_value = 300
+    mock_repo.consumo_existentes.return_value = {
+        (10, 300, "ID_PRODUCTO"): ExistenteVersionado(id=88, fecha_aprobacion=None)
+    }
+    # Fila migrada antes de 2026-10-05: sin clase ni fecha.
+    mock_repo.campos_actuales.return_value = {"clase": None, "fecha_aprobacion": None}
+
+    resultado = carga_gdd.ejecutar_merge_dominio(MagicMock(), staging_repo, "ADS")
+
+    assert resultado.ok, resultado.error
+    assert resultado.consumos_actualizados == 1
+    args = mock_repo.actualizar_atributo_fuente_consumo.call_args.args
+    assert args[1] == 88
+    assert args[2] == {"clase": "Registro_alianzas_establecimientos",
+                       "fecha_aprobacion": datetime.date(2026, 8, 21)}
+    mock_repo.insertar_atributo_fuente_consumo.assert_not_called()
+    mock_repo.eliminar_atributo_fuente_consumo.assert_not_called()
 
 
 def test_consumo_ausente_del_excel_se_da_de_baja(monkeypatch):
-    """El destino de consumo ya no aparece en el Excel (columnas _foc
-    vacias) -- baja logica, mismo patron que respaldo/investigacion/
-    plan_remediacion."""
-    staging_repo = MagicMock()
-    staging_repo.leer.return_value = [_fila_detalle()]
-    staging_repo.leer_por_prefijo.return_value = [_fila_metadata()]  # sin datos _foc ahora
+    """El destino de consumo ya no aparece en MetadataRepositorio (incluida
+    la hoja sin filas, decision 2026-10-05) -- baja logica."""
+    staging_repo = _staging(repositorio=[])
     mock_repo = _parchear_repo_gdd(monkeypatch)
     mock_repo.consumo_existentes.return_value = {
         (10, 300, "ID_PRODUCTO"): ExistenteVersionado(id=88, fecha_aprobacion=None)
     }
-    engine = MagicMock()
 
-    resultado = carga_gdd.ejecutar_merge_dominio(engine, staging_repo, "ADS")
+    resultado = carga_gdd.ejecutar_merge_dominio(MagicMock(), staging_repo, "ADS")
 
     assert resultado.ok, resultado.error
     assert resultado.consumos_eliminados == 1
@@ -607,23 +645,16 @@ def test_consumo_ausente_del_excel_se_da_de_baja(monkeypatch):
 
 
 def test_consumo_se_agrupa_por_atributo_dos_filas_dos_destinos(monkeypatch):
-    """Confirmado con el usuario: un atributo puede tener mas de un destino
-    de consumo, repitiendo codigo_dominio_atributo en varias filas."""
-    staging_repo = MagicMock()
-    staging_repo.leer.return_value = [_fila_detalle()]
-    staging_repo.leer_por_prefijo.return_value = [
-        _fila_metadata(coleccion_foc="Vista", servidor_foc="BI01", tabla_bv_foc="VW_VENTAS", nombre_campo_foc="ID_PRODUCTO"),
-        _fila_metadata(coleccion_foc="Vista", servidor_foc="BI02", tabla_bv_foc="VW_REPORTES", nombre_campo_foc="COD_PRODUCTO"),
-    ]
+    """Un atributo puede tener mas de un destino de consumo, repitiendo
+    codigo_dominio_atributo en varias filas."""
+    staging_repo = _staging(repositorio=[
+        _fila_repositorio(servidor_foc="BI01", tabla_bv_foc="VW_VENTAS", nombre_campo_foc="ID_PRODUCTO"),
+        _fila_repositorio(servidor_foc="BI02", tabla_bv_foc="VW_REPORTES", nombre_campo_foc="COD_PRODUCTO"),
+    ])
     mock_repo = _parchear_repo_gdd(monkeypatch)
-    # Constante a proposito: tambien lo llama _resolver_id_bdd para las 2
-    # filas de fuente_oficial primaria (servidor_fuente_oficial no vacio en
-    # _fila_metadata) -- lo que distingue los 2 destinos de consumo aqui es
-    # nombre_tabla/nombre_campo, no id_servidor.
     mock_repo.resolver_o_crear_servidor.return_value = 7
-    engine = MagicMock()
 
-    resultado = carga_gdd.ejecutar_merge_dominio(engine, staging_repo, "ADS")
+    resultado = carga_gdd.ejecutar_merge_dominio(MagicMock(), staging_repo, "ADS")
 
     assert resultado.ok, resultado.error
     assert resultado.consumos_insertados == 2

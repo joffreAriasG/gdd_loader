@@ -223,7 +223,6 @@ class FuenteOficialPendiente:
 
     codigo_dominio_atributo: str
     es_fuente_primaria: bool
-    clase_texto: str | None
     servidor_texto: str | None
     base_datos_texto: str | None
     nombre_campo: str
@@ -241,6 +240,12 @@ class FuenteOficialPendiente:
     # tablas/archivos del mismo servidor y base de datos.
     nombre_tabla: str | None = None
 
+    # 2026-10-05 (plantilla 2.0.0): `clase` sale de la fuente oficial -- la
+    # columna se quito de MetadataTecnica y ahora vive solo en
+    # MetadataRepositorio -> gdd.atributo_fuente_consumo (decision del
+    # usuario). gdd.atributo_fuente_oficial.clase se conserva en la tabla con
+    # sus valores historicos, pero el loader ya no la lee ni la escribe.
+    #
     # Nota: a diferencia de AtributoPendiente, esta clase NO expone una
     # `clave_natural` propia -- (clase, es_fuente_primaria) resulto
     # insuficiente (colapsaba filas de sistemas/tablas fuente distintos que
@@ -294,7 +299,9 @@ def mapear_metadata_tecnica(registros: list[dict]) -> list[FuenteOficialPendient
     """`registros`: filas de staging.metadata_tecnica como dicts.
 
     Cada fila genera UNA fuente oficial primaria, solo con las columnas
-    "_oficial" (servidor, base de datos, tabla, clase, campo...).
+    "_oficial" (servidor, base de datos, tabla, campo...). Desde la
+    plantilla 2.0.0 (2026-10-05) MetadataTecnica ya no trae `clase` ni las
+    columnas "_foc" (pasaron a la hoja MetadataRepositorio).
 
     CORRECCION 2026-10-01 (definicion del usuario): las columnas "_foc"
     (servidor_foc, coleccion_foc, tabla_bv_foc, nombre_campo_foc) NUNCA van
@@ -320,7 +327,6 @@ def mapear_metadata_tecnica(registros: list[dict]) -> list[FuenteOficialPendient
             FuenteOficialPendiente(
                 codigo_dominio_atributo=codigo_dominio_atributo,
                 es_fuente_primaria=True,
-                clase_texto=_texto_o_none(fila["clase"]),
                 servidor_texto=_texto_o_none(fila["servidor_fuente_oficial"]),
                 base_datos_texto=_texto_o_none(fila["base_datos_fuente_oficial"]),
                 nombre_campo=str(fila["nombre_campo_fuente_oficial"]).strip(),
@@ -385,31 +391,32 @@ class ConsumoPendiente:
     coleccion_texto: str
     nombre_tabla: str
     nombre_campo: str
+    # 2026-10-05 (plantilla 2.0.0, hoja MetadataRepositorio): campos MUTABLES
+    # (no son parte de la clave natural). clase: texto libre, sin catalogo
+    # (decision del usuario). fecha_aprobacion: propia del consumo,
+    # independiente de la fecha de la fuente oficial (MetadataTecnica). Si
+    # cambian, la fila de gdd se actualiza en sitio (UPDATE), sin versionar.
+    clase: str | None = None
+    fecha_aprobacion: datetime.date | None = None
 
 
 def mapear_atributo_fuente_consumo(registros: list[dict]) -> list[ConsumoPendiente]:
-    """`registros`: filas de staging.metadata_tecnica como dicts (la MISMA
-    fuente que mapear_metadata_tecnica -- las columnas _foc viven en la
-    misma hoja/tabla que las columnas _oficial, ver SheetConfig de
-    MetadataTecnica en domain/sheet_config.py).
+    """`registros`: filas de staging.metadata_repositorio como dicts.
 
-    Agrupa por codigo_dominio_atributo y deduplica por
-    (servidor_foc, coleccion_foc, tabla_bv_foc, nombre_campo_foc) -- confirmado
-    con el usuario 2026-09-17: la cardinalidad de consumo es directa con el
-    atributo, y la plantilla puede repetir codigo_dominio_atributo en varias
-    filas cuando un atributo tiene mas de un destino de consumo.
+    CAMBIO 2026-10-05 (plantilla 2.0.0): la fuente es la hoja
+    MetadataRepositorio (staging.metadata_repositorio), una fila por destino
+    de consumo -- ya no las columnas "_foc" de MetadataTecnica, donde cada
+    destino se repetia en todas las filas de fuente oficial del atributo.
 
-    Una fila solo cuenta como "destino de consumo real" si trae servidor_foc,
-    coleccion_foc, tabla_bv_foc Y nombre_campo_foc (las 4 columnas que
-    identifican DONDE se consulta el atributo) -- sin al menos esas 4 no hay
-    destino identificable, se omite en vez de insertar una fila a medias.
-    REFACTOR 2026-09-18: coleccion_foc paso de ser solo descriptivo a obligatorio
-    (ver ConsumoPendiente) -- ahora forma parte de la clave de agrupacion,
-    no solo un campo mutable, porque resuelve la coleccion/base de datos
-    destino (id_bdd), que identifica al destino tanto como servidor/tabla/
-    campo. Si el mismo (atributo, servidor, clase, tabla, campo) aparece mas
-    de una vez (duplicado exacto), la ULTIMA fila del grupo gana -- no se
-    reporta como error, describe el mismo destino de consumo.
+    Todas las columnas son obligatorias (validado al leer el Excel, ver
+    SheetConfig.columnas_obligatorias), asi que aqui una fila sin
+    servidor/coleccion/tabla/campo es un error, no una fila a omitir.
+
+    Clave dentro del archivo: (codigo_dominio_atributo, servidor_foc,
+    coleccion_foc, tabla_bv_foc, nombre_campo_foc). Si la misma clave aparece
+    dos veces con clase o fecha_aprobada distintas, es ambiguo cual vale --
+    se rechaza con error (antes: la ultima fila ganaba en silencio). Un
+    duplicado exacto se toma una sola vez.
     """
     vistos: dict[tuple[str, str, str, str, str], ConsumoPendiente] = {}
     for fila in registros:
@@ -421,10 +428,23 @@ def mapear_atributo_fuente_consumo(registros: list[dict]) -> list[ConsumoPendien
         tabla = _texto_o_none(fila.get("tabla_bv_foc"))
         campo = _texto_o_none(fila.get("nombre_campo_foc"))
         if servidor is None or coleccion is None or tabla is None or campo is None:
-            continue
+            raise ValueError(
+                f"MetadataRepositorio {codigo_dominio_atributo}: servidor_foc, coleccion_foc, "
+                "tabla_bv_foc y nombre_campo_foc son obligatorios."
+            )
+
+        fecha = fila.get("fecha_aprobada")
+        if fecha is not None and not isinstance(fecha, datetime.date):
+            fecha = (
+                _parsear_fecha_aprobada_metadata(fecha, codigo_dominio_atributo)
+                if _texto_o_none(fecha) is not None
+                else None
+            )
+        elif isinstance(fecha, datetime.datetime):
+            fecha = fecha.date()
 
         clave = (codigo_dominio_atributo, servidor, coleccion, tabla, campo)
-        vistos[clave] = ConsumoPendiente(
+        nuevo = ConsumoPendiente(
             codigo_dominio=codigo_dominio,
             codigo_atributo=codigo_atributo,
             codigo_dominio_atributo=codigo_dominio_atributo,
@@ -432,7 +452,18 @@ def mapear_atributo_fuente_consumo(registros: list[dict]) -> list[ConsumoPendien
             coleccion_texto=coleccion,
             nombre_tabla=tabla,
             nombre_campo=campo,
+            clase=_texto_o_none(fila.get("clase")),
+            fecha_aprobacion=fecha,
         )
+        previo = vistos.get(clave)
+        if previo is not None and previo != nuevo:
+            raise ValueError(
+                f"MetadataRepositorio {codigo_dominio_atributo}: el destino "
+                f"{servidor}/{coleccion}/{tabla}/{campo} aparece mas de una vez con distinta "
+                f"clase o fecha_aprobada ('{previo.clase}' {previo.fecha_aprobacion} vs "
+                f"'{nuevo.clase}' {nuevo.fecha_aprobacion}) -- dejar una sola fila."
+            )
+        vistos[clave] = nuevo
 
     return list(vistos.values())
 

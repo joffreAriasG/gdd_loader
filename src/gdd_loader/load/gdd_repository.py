@@ -114,6 +114,11 @@ objetivo es que no deban haber duplicidad o crearse sin sentido".
   intermedio para encontrar id_bdd -- simplemente ya no queda como columna
   aparte.
 
+CAMBIO 2026-10-05 (plantilla 2.0.0): la fuente pasa a ser la hoja
+MetadataRepositorio y se agregan los campos mutables clase y
+fecha_aprobacion, con actualizar_atributo_fuente_consumo (UPDATE en sitio).
+El texto siguiente describe el estado anterior a ese cambio.
+
 Clave natural (dentro de un mismo id_atributo): (id_bdd, id_tabla,
 nombre_campo) -- YA NO QUEDA NINGUN CAMPO MUTABLE (a diferencia del diseno
 original de 2026-09-17, donde `clase` era mutable): todos los campos que
@@ -495,33 +500,45 @@ def eliminar_atributo(conn: Connection, id_atributo: int) -> None:
 
 def fuente_oficial_existentes(
     conn: Connection, id_atributo: int
-) -> dict[tuple[str, str, int, bool, str], ExistenteVersionado]:
-    """Clave natural real: (clase, nombre_campo, id_bdd, es_fuente_primaria,
+) -> dict[tuple[str, int, bool, str], ExistenteVersionado]:
+    """Clave natural real: (nombre_campo, id_bdd, es_fuente_primaria,
     nombre_tabla). nombre_tabla agregado 2026-10-01 (ver
     carga_gdd._clave_fuente); requiere la migracion
     db/migraciones/20261001_fuente_oficial_nombre_tabla.sql.
 
-    (clase, es_fuente_primaria) por si solo NO alcanza: un mismo atributo
-    puede tener varias filas de metadata_tecnica que comparten `clase` pero
-    vienen de sistemas/tablas fuente distintos (ej. nucleo NOVA vs Coris),
-    diferenciados por nombre_campo_fuente_oficial y/o
-    base_datos_fuente_oficial. Confirmado con datos reales: la clave vieja
-    colapsaba 210 filas de metadata_tecnica en solo 94 (perdida silenciosa
-    de 116 filas); esta clave no tiene colisiones en esos mismos datos.
+    CAMBIO 2026-10-05 (plantilla 2.0.0): `clase` sale de la clave -- ya no
+    viene en MetadataTecnica (paso a MetadataRepositorio / fuente de consumo).
+    La columna gdd.atributo_fuente_oficial.clase se conserva con sus valores
+    historicos, pero ya no se lee ni se escribe. Las filas activas que solo se
+    diferenciaban por clase (atributo 349, 4 pares) se resuelven antes con
+    db/migraciones/20261005_metadata_repositorio.sql. Si aun quedara alguna,
+    se rechaza el dominio con error en vez de dejar una fila activa que el
+    merge ya no podria dar de baja.
+
+    Historia: (clase, es_fuente_primaria) por si solo NO alcanzaba -- la
+    clave vieja colapsaba 210 filas de metadata_tecnica en solo 94.
+    nombre_campo + id_bdd + nombre_tabla son los que distinguen sistemas y
+    tablas fuente.
     """
     filas = conn.execute(
         text(
-            "SELECT id, clase, nombre_campo, id_bdd, es_fuente_primaria, nombre_tabla, fecha_aprobacion "
+            "SELECT id, nombre_campo, id_bdd, es_fuente_primaria, nombre_tabla, fecha_aprobacion "
             "FROM gdd.atributo_fuente_oficial WHERE id_atributo = :id_atributo AND activo = 1"
         ),
         {"id_atributo": id_atributo},
     ).all()
-    return {
-        (fila.clase or "", fila.nombre_campo, fila.id_bdd, bool(fila.es_fuente_primaria),
-         fila.nombre_tabla or ""):
-        ExistenteVersionado(id=fila.id, fecha_aprobacion=fila.fecha_aprobacion)
-        for fila in filas
-    }
+    resultado: dict[tuple[str, int, bool, str], ExistenteVersionado] = {}
+    for fila in filas:
+        clave = (fila.nombre_campo, fila.id_bdd, bool(fila.es_fuente_primaria), fila.nombre_tabla or "")
+        if clave in resultado:
+            raise ValueError(
+                f"gdd.atributo_fuente_oficial: id_atributo={id_atributo} tiene filas activas "
+                f"duplicadas para (nombre_campo, id_bdd, es_fuente_primaria, nombre_tabla)={clave} "
+                f"(ids {resultado[clave].id} y {fila.id}) -- correr "
+                "db/migraciones/20261005_metadata_repositorio.sql antes de cargar."
+            )
+        resultado[clave] = ExistenteVersionado(id=fila.id, fecha_aprobacion=fila.fecha_aprobacion)
+    return resultado
 
 
 def insertar_fuente_oficial(conn: Connection, campos: dict) -> int:
@@ -917,20 +934,25 @@ def eliminar_plan_remediacion(conn: Connection, id_plan: int) -> None:
 # FuenteConsumo / "_foc" (2026-09-17, alcance ampliado; REFACTORIZADA
 # 2026-09-18, dos vueltas -- ver nota de modulo): trazabilidad de CONSUMO de
 # un atributo especifico -- FK id_atributo, igual que plan_remediacion/
-# atributo_fuente_oficial. A diferencia de atributo_fuente_oficial (de donde
-# se CARGA el atributo), esto registra en que tabla/campo de negocio se
-# CONSULTA -- ver nota de modulo y gdd_mapping.ConsumoPendiente. Clave
-# natural (dentro de un mismo id_atributo): (id_bdd, id_tabla, nombre_campo)
-# -- sin id_servidor (redundante, se alcanza via base_datos_fuente.id_servidor,
-# mismo patron que atributo_fuente_oficial) y sin ningun campo mutable, por
-# eso no existe actualizar_atributo_fuente_consumo (ver nota de modulo).
+# atributo_fuente_oficial. Clave natural (dentro de un mismo id_atributo):
+# (id_bdd, id_tabla, nombre_campo).
+#
+# CAMBIO 2026-10-05 (plantilla 2.0.0): la fuente es la hoja
+# MetadataRepositorio y se agregan dos campos MUTABLES, clase (texto libre) y
+# fecha_aprobacion (propia del consumo). Si cambian, la fila se actualiza en
+# sitio (actualizar_atributo_fuente_consumo), sin versionar ni bitacora --
+# mismo criterio que respaldo/plan_remediacion. Requiere
+# db/migraciones/20261005_metadata_repositorio.sql.
+
+CAMPOS_MUTABLES_CONSUMO = ("clase", "fecha_aprobacion")
 
 
 def consumo_existentes(conn: Connection, id_atributo: int) -> dict[tuple[int, int, str], ExistenteVersionado]:
     """Filas activas de gdd.atributo_fuente_consumo de un atributo, por
     (id_bdd, id_tabla, nombre_campo) -- la clave natural completa
-    (id_atributo ya acota la consulta). fecha_aprobacion siempre None -- no
-    dispara versionado.
+    (id_atributo ya acota la consulta). fecha_aprobacion siempre None en el
+    ExistenteVersionado -- la fecha del consumo es un campo mutable, no
+    dispara versionado (se compara con campos_actuales).
     """
     filas = conn.execute(
         text(
@@ -949,19 +971,27 @@ def insertar_atributo_fuente_consumo(conn: Connection, campos: dict) -> int:
     return conn.execute(
         text(
             "INSERT INTO gdd.atributo_fuente_consumo "
-            "(id_atributo, id_bdd, id_tabla, nombre_campo) "
+            "(id_atributo, id_bdd, id_tabla, nombre_campo, clase, fecha_aprobacion) "
             "OUTPUT INSERTED.id "
-            "VALUES (:id_atributo, :id_bdd, :id_tabla, :nombre_campo)"
+            "VALUES (:id_atributo, :id_bdd, :id_tabla, :nombre_campo, :clase, :fecha_aprobacion)"
         ),
         campos,
     ).scalar_one()
 
 
-# No hay actualizar_atributo_fuente_consumo: TODOS los campos (id_bdd/
-# id_tabla/nombre_campo) son la clave natural -- si el plan de merge emite
-# ACTUALIZAR es porque la clave ya coincidia entre lo existente y lo
-# entrante, y no hay nada que escribir (ver pipeline/carga_gdd.py, que
-# cuenta ese caso directamente como "sin cambios" sin llamar al repositorio).
+def actualizar_atributo_fuente_consumo(conn: Connection, id_registro: int, campos: dict) -> None:
+    """UPDATE en sitio de los campos mutables (clase, fecha_aprobacion).
+    Solo acepta CAMPOS_MUTABLES_CONSUMO: la clave natural nunca se
+    actualiza (si cambia, el plan emite ELIMINAR + INSERTAR).
+    """
+    invalidas = set(campos) - set(CAMPOS_MUTABLES_CONSUMO)
+    if invalidas:
+        raise ValueError(f"actualizar_atributo_fuente_consumo: columnas no mutables {sorted(invalidas)}")
+    set_clause = ", ".join(f"[{c}] = :{c}" for c in campos.keys())
+    conn.execute(
+        text(f"UPDATE gdd.atributo_fuente_consumo SET {set_clause} WHERE id = :id"),
+        {**campos, "id": id_registro},
+    )
 
 
 def eliminar_atributo_fuente_consumo(conn: Connection, id_registro: int) -> None:
