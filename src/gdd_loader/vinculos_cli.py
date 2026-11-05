@@ -28,6 +28,14 @@ from gdd_loader.logging_setup import configurar_logging
 from gdd_loader.pipeline.vinculos_gdd import resolver_vinculos_dominio
 
 
+def _dominios_validos(dominios: list) -> tuple[list[str], int]:
+    """Descarta valores NULL o vacios de codigo_dominio (filas de staging sin
+    dominio): no se pueden procesar y rompian el armado del mensaje de log.
+    Retorna (dominios validos, cantidad descartada)."""
+    validos = [str(d).strip() for d in dominios if d is not None and str(d).strip()]
+    return validos, len(dominios) - len(validos)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Completa id_atributo_primario / id_dominio_primario pendientes en gdd.atributo"
@@ -49,8 +57,16 @@ def main() -> int:
 
     engine = construir_engine(settings)
     staging_repo = StagingRepository(engine)
-    dominios = [args.dominio] if args.dominio else staging_repo.dominios_distintos(
-        "staging.detalle_atributos", "codigo_dominio")
+    if args.dominio:
+        dominios = [args.dominio]
+    else:
+        dominios, descartados = _dominios_validos(
+            staging_repo.dominios_distintos("staging.detalle_atributos", "codigo_dominio"))
+        if descartados:
+            logger.warning(
+                "staging.detalle_atributos tiene filas con codigo_dominio NULL o vacio: se ignoran "
+                "(revisar la carga que las genero)."
+            )
     if not dominios:
         logger.error("No hay dominios en staging.detalle_atributos")
         return 1

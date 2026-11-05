@@ -162,3 +162,15 @@ def test_repositorio_solo_escribe_columnas_de_vinculo_y_solo_si_siguen_null():
 def test_repositorio_rechaza_columnas_no_permitidas(valores):
     with pytest.raises(ValueError):
         vrepo_real.completar_vinculos(MagicMock(), 10, valores)
+
+
+@pytest.mark.parametrize("entrada,esperado,descartados", [
+    (["ADS", "CAC"], ["ADS", "CAC"], 0),
+    (["ADS", None], ["ADS"], 1),
+    ([None], [], 1),
+    (["ADS", "", "  ", None, " CAC "], ["ADS", "CAC"], 3),
+    ([], [], 0),
+])
+def test_cli_descarta_dominios_null_o_vacios(entrada, esperado, descartados):
+    from gdd_loader.vinculos_cli import _dominios_validos
+    assert _dominios_validos(entrada) == (esperado, descartados)
