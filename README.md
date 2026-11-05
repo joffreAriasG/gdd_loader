@@ -179,6 +179,30 @@ python -m gdd_loader.cli --archivo X.xlsx        # solo Excel -> staging
 python -m gdd_loader.merge_cli --dominio ADS     # solo staging -> gdd
 ```
 
+### Vínculos pendientes (v0.8.0, paso adicional al merge)
+
+```powershell
+python -m gdd_loader.vinculos_cli                  # todos los dominios, SIMULACIÓN
+python -m gdd_loader.vinculos_cli --dominio ADS    # un dominio, SIMULACIÓN
+python -m gdd_loader.vinculos_cli --aplicar        # escribe en gdd
+```
+
+Completa `id_atributo_primario` / `id_dominio_primario` de `gdd.atributo` cuando
+ya existe la coincidencia (por ejemplo, el dominio del atributo primario se
+cargó después). No modifica el merge. Correr después de `merge_cli`.
+
+- Sin `--aplicar` solo informa. Con `--aplicar` escribe y deja una línea
+  `ACTUALIZAR` en `gdd.bitacora_carga` (sin `id_carga`) por atributo.
+- Candidatos: atributos activos con alguno de los dos campos en `NULL` y cuya
+  fila de `staging.detalle_atributos` trae ambos textos. Usa la misma
+  coincidencia conjunta (atributo y dominio) que el merge.
+- Solo se aplica si la `fecha_aprobada` de staging es igual a la
+  `fecha_aprobacion` de gdd (el merge ya consolidó esa versión).
+- Solo completa `NULL`: nunca pisa un valor existente (si difiere, lo informa
+  como conflicto). No cambia versión, release ni fecha.
+- Una transacción por dominio; idempotente. Que queden vínculos sin
+  coincidencia no es un error (código de salida 0).
+
 ### Versiones de plantilla (equipo central)
 
 Ver `db/README.md`. Resumen:
