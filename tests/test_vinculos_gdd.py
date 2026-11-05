@@ -174,3 +174,54 @@ def test_repositorio_rechaza_columnas_no_permitidas(valores):
 def test_cli_descarta_dominios_null_o_vacios(entrada, esperado, descartados):
     from gdd_loader.vinculos_cli import _dominios_validos
     assert _dominios_validos(entrada) == (esperado, descartados)
+
+
+def test_ignorar_fecha_aplica_aunque_staging_sea_mas_viejo_y_lo_marca(entorno):
+    engine, staging, repo, vrepo = entorno
+    vrepo.atributo_activo.return_value = _actual(fecha=datetime.date(2026, 6, 26))
+    staging.leer.return_value = [_fila(fecha=datetime.date(2025, 10, 13))]
+    r = vinculos_gdd.resolver_vinculos_dominio(engine, staging, "ADS", aplicar=True, ignorar_fecha=True)
+    assert r.ok and r.ignorar_fecha and r.omitidos_fecha == 0
+    assert len(r.resueltos) == 1
+    assert r.resueltos[0].fechas_distintas == (datetime.date(2025, 10, 13), datetime.date(2026, 6, 26))
+    conn = engine.begin.return_value.__enter__.return_value
+    vrepo.completar_vinculos.assert_called_once_with(
+        conn, 10, {"id_atributo_primario": 777, "id_dominio_primario": 88})
+    repo.registrar_bitacora.assert_called_once()
+
+
+def test_ignorar_fecha_con_fechas_iguales_no_marca_nada(entorno):
+    engine, staging, repo, vrepo = entorno
+    r = vinculos_gdd.resolver_vinculos_dominio(engine, staging, "ADS", aplicar=False, ignorar_fecha=True)
+    assert len(r.resueltos) == 1 and r.resueltos[0].fechas_distintas is None
+
+
+def test_ignorar_fecha_no_relaja_las_demas_reglas(entorno):
+    engine, staging, repo, vrepo = entorno
+    # conflicto: sigue sin tocarse aunque se ignore la fecha
+    vrepo.atributo_activo.return_value = _actual(fecha=datetime.date(2020, 1, 1), id_attr=999)
+    r = vinculos_gdd.resolver_vinculos_dominio(engine, staging, "ADS", aplicar=True, ignorar_fecha=True)
+    assert len(r.conflictos) == 1 and not r.resueltos
+    vrepo.completar_vinculos.assert_not_called()
+    # sin coincidencia: tampoco escribe
+    vrepo.atributo_activo.return_value = _actual(fecha=datetime.date(2020, 1, 1))
+    repo.buscar_atributo_primario.return_value = (None, None)
+    r = vinculos_gdd.resolver_vinculos_dominio(engine, staging, "ADS", aplicar=True, ignorar_fecha=True)
+    assert len(r.sin_coincidencia) == 1 and not r.resueltos
+
+
+def test_fecha_distinta_sin_la_bandera_sigue_omitiendo(entorno):
+    engine, staging, repo, vrepo = entorno
+    vrepo.atributo_activo.return_value = _actual(fecha=datetime.date(2026, 6, 26))
+    staging.leer.return_value = [_fila(fecha=datetime.date(2025, 10, 13))]
+    r = vinculos_gdd.resolver_vinculos_dominio(engine, staging, "ADS", aplicar=True)
+    assert r.omitidos_fecha == 1 and not r.resueltos and not r.ignorar_fecha
+
+
+def test_cli_acepta_ignorar_fecha_y_su_abreviatura():
+    from gdd_loader.vinculos_cli import _construir_parser
+    assert _construir_parser().parse_args([]).ignorar_fecha is False
+    assert _construir_parser().parse_args(["--ignorar-fecha"]).ignorar_fecha is True
+    assert _construir_parser().parse_args(["--ignorar"]).ignorar_fecha is True
+    a = _construir_parser().parse_args(["--aplicar", "--ignorar", "--dominio", "CND"])
+    assert a.aplicar and a.ignorar_fecha and a.dominio == "CND"

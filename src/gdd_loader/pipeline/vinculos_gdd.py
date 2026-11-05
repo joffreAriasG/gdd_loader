@@ -15,6 +15,11 @@ Reglas:
   - Solo se aplica si fecha_aprobada de staging == fecha_aprobacion de gdd (es
     decir, si el merge ya consolido esa version). Si difieren, se omite: no
     se aplican datos de una carga que el merge todavia no proceso.
+    EXCEPCION EXPLICITA: con ignorar_fecha=True (--ignorar-fecha) esa
+    comprobacion se salta. Riesgo: si staging es MAS VIEJO que gdd, se aplica
+    un vinculo de una version anterior sobre una version mas nueva. Por eso
+    cada vinculo aplicado con fecha distinta queda marcado en el informe con
+    las dos fechas.
   - Solo completa NULL; nunca pisa un valor existente. Si el valor existente
     difiere del que resolveria, se informa como CONFLICTO y no se toca.
   - Escribe UNICAMENTE id_atributo_primario / id_dominio_primario: no cambia
@@ -43,12 +48,15 @@ logger = logging.getLogger("gdd_loader.vinculos")
 class VinculoResuelto:
     codigo_dominio_atributo: str
     columnas: dict  # {columna: id} que se completan (o se completarian)
+    # Solo con ignorar_fecha=True y fechas distintas: (fecha staging, fecha gdd).
+    fechas_distintas: tuple | None = None
 
 
 @dataclass
 class ResultadoVinculos:
     codigo_dominio: str
     aplicado: bool
+    ignorar_fecha: bool = False
     resueltos: list[VinculoResuelto] = field(default_factory=list)
     sin_coincidencia: list[tuple[str, str, str]] = field(default_factory=list)  # (cod_dom_atr, atributo, dominio)
     conflictos: list[str] = field(default_factory=list)
@@ -72,9 +80,11 @@ def _a_fecha(valor):
 
 
 def resolver_vinculos_dominio(
-    engine: Engine, staging_repo: StagingRepository, codigo_dominio: str, aplicar: bool = False
+    engine: Engine, staging_repo: StagingRepository, codigo_dominio: str,
+    aplicar: bool = False, ignorar_fecha: bool = False,
 ) -> ResultadoVinculos:
-    resultado = ResultadoVinculos(codigo_dominio=codigo_dominio, aplicado=aplicar)
+    resultado = ResultadoVinculos(codigo_dominio=codigo_dominio, aplicado=aplicar,
+                                  ignorar_fecha=ignorar_fecha)
     try:
         filas = staging_repo.leer("staging.detalle_atributos", "codigo_dominio", codigo_dominio)
         # begin() confirma al salir; connect() no escribe (simulacion).
@@ -103,7 +113,10 @@ def resolver_vinculos_dominio(
                     resultado.ya_vinculados += 1
                     continue
 
-                if _a_fecha(fila.get("fecha_aprobada")) != _a_fecha(actual["fecha_aprobacion"]):
+                fecha_staging = _a_fecha(fila.get("fecha_aprobada"))
+                fecha_gdd = _a_fecha(actual["fecha_aprobacion"])
+                fecha_distinta = fecha_staging != fecha_gdd
+                if fecha_distinta and not ignorar_fecha:
                     resultado.omitidos_fecha += 1
                     continue
 
@@ -130,7 +143,10 @@ def resolver_vinculos_dominio(
                     continue
 
                 a_completar = {c: v for c, v in resueltos.items() if actual[c] is None}
-                resultado.resueltos.append(VinculoResuelto(cod_dom_atr, a_completar))
+                resultado.resueltos.append(VinculoResuelto(
+                    cod_dom_atr, a_completar,
+                    (fecha_staging, fecha_gdd) if fecha_distinta else None,
+                ))
                 if aplicar:
                     vrepo.completar_vinculos(conn, actual["id"], a_completar)
                     repo.registrar_bitacora(

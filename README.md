@@ -185,6 +185,7 @@ python -m gdd_loader.merge_cli --dominio ADS     # solo staging -> gdd
 python -m gdd_loader.vinculos_cli                  # todos los dominios, SIMULACIÓN
 python -m gdd_loader.vinculos_cli --dominio ADS    # un dominio, SIMULACIÓN
 python -m gdd_loader.vinculos_cli --aplicar        # escribe en gdd
+python -m gdd_loader.vinculos_cli --ignorar-fecha  # no exige igualdad de fechas (v0.8.2)
 ```
 
 Completa `id_atributo_primario` / `id_dominio_primario` de `gdd.atributo` cuando
@@ -198,6 +199,10 @@ cargó después). No modifica el merge. Correr después de `merge_cli`.
   coincidencia conjunta (atributo y dominio) que el merge.
 - Solo se aplica si la `fecha_aprobada` de staging es igual a la
   `fecha_aprobacion` de gdd (el merge ya consolidó esa versión).
+  `--ignorar-fecha` (abreviable como `--ignorar`) salta esa comprobación: si
+  staging es más viejo que gdd, aplica un vínculo de una versión anterior sobre
+  una más nueva. Cada vínculo aplicado con fecha distinta se lista como
+  `FECHA IGNORADA` con las dos fechas; revisar primero en simulación.
 - Solo completa `NULL`: nunca pisa un valor existente (si difiere, lo informa
   como conflicto). No cambia versión, release ni fecha.
 - Una transacción por dominio; idempotente. Que queden vínculos sin
