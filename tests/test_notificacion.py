@@ -64,27 +64,64 @@ def test_fuente_oficial_clave_incluye_bdd_y_marca_primaria():
     assert registros[clave].campos["Longitud"] == "10"
 
 
-def test_fuente_consumo_informa_cambio_de_clase_y_fecha():
-    """2026-10-05: clase y fecha_aprobacion de consumo se muestran como
-    anterior -> nuevo (el merge las actualiza en sitio)."""
+def _consumo(clase, fecha):
+    fila = dict(codigo_atributo=1, nombre_atributo="Codigo establecimiento", servidor="Stratio",
+                base_datos="gob_reg_alianzas_establecimientos",
+                tabla="ZP_BP_Mdp_Tc_TN_EstablecimientosConsumos",
+                nombre_campo="codigoUnicoEstablecimiento", clase=clase, fecha_aprobacion=fecha)
+    return {"Fuentes de consumo": ins.construir_registros(ins.FUENTES_CONSUMO, [fila])}
+
+
+def test_fuente_consumo_cambio_de_clase_es_baja_mas_nuevo():
+    """2026-10-06 (R6): clase es parte de la clave -> en la minuta un cambio
+    de clase se ve como dado de baja + nuevo, igual que en el merge."""
     import datetime
-
-    def consumo(clase, fecha):
-        fila = dict(codigo_atributo=1, nombre_atributo="Codigo establecimiento", servidor="Stratio",
-                    base_datos="gob_reg_alianzas_establecimientos",
-                    tabla="ZP_BP_Mdp_Tc_TN_EstablecimientosConsumos",
-                    nombre_campo="codigoUnicoEstablecimiento", clase=clase, fecha_aprobacion=fecha)
-        return {"Fuentes de consumo": ins.construir_registros(ins.FUENTES_CONSUMO, [fila])}
-
     [seccion] = [s for s in comparar(
-        consumo(None, None),
-        consumo("Registro_alianzas_establecimientos", datetime.date(2026, 8, 21)),
+        _consumo("Clase_A", datetime.date(2026, 8, 21)),
+        _consumo("Clase_B", datetime.date(2026, 8, 21)),
+    ) if s.entidad == "Fuentes de consumo"]
+    assert [c.etiqueta for c in seccion.bajas] and "Clase_A" in seccion.bajas[0].etiqueta
+    assert "Clase_B" in seccion.nuevos[0].etiqueta
+    assert seccion.modificados == []
+
+
+def test_fuente_consumo_cambio_de_fecha_es_modificado():
+    import datetime
+    [seccion] = [s for s in comparar(
+        _consumo("Clase_A", datetime.date(2026, 8, 21)),
+        _consumo("Clase_A", datetime.date(2026, 9, 1)),
     ) if s.entidad == "Fuentes de consumo"]
     [mod] = seccion.modificados
     assert [(c.campo, c.anterior, c.nuevo) for c in mod.campos] == [
-        ("Clase", "", "Registro_alianzas_establecimientos"),
-        ("Fecha de aprobación", "", "2026-08-21"),
-    ]
+        ("Fecha de aprobación", "2026-08-21", "2026-09-01")]
+
+
+def _fuentes(*formulas):
+    filas = []
+    for f in formulas:
+        fila = {c: None for c in ins.FUENTES_OFICIALES.campos}
+        fila.update(codigo_atributo=125, nombre_atributo="x", servidor="PPRD", base_datos="T06TC002",
+                    tabla="", nombre_campo="DEL_REGISTRO", es_fuente_primaria=True, formula_calculo=f)
+        filas.append(fila)
+    return {"Fuentes oficiales": ins.construir_registros(ins.FUENTES_OFICIALES, filas)}
+
+
+def test_fuente_oficial_dos_formulas_aparecen_como_dos_fuentes():
+    """Caso CLI-125: misma fuente con dos formulas -> dos registros en la
+    foto, con la formula en la etiqueta."""
+    registros = _fuentes("SUMA(Y)", "PROMEDIO(Y)")["Fuentes oficiales"]
+    assert len(registros) == 2
+    assert all("fórmula:" in r.etiqueta for r in registros.values())
+
+
+def test_fuente_oficial_formula_corregida_es_modificado():
+    """Opcion B: 1 fuente antes y 1 despues -> la formula se ve como
+    anterior -> nuevo (no baja + alta)."""
+    [seccion] = [s for s in comparar(_fuentes("SUMA(Y)"), _fuentes("SUMA(Y) / 2"))
+                 if s.entidad == "Fuentes oficiales"]
+    [mod] = seccion.modificados
+    assert ("Fórmula de cálculo", "SUMA(Y)", "SUMA(Y) / 2") in [(c.campo, c.anterior, c.nuevo) for c in mod.campos]
+    assert seccion.nuevos == [] and seccion.bajas == []
 
 
 def test_fuente_oficial_informa_cambio_de_version():

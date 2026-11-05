@@ -391,11 +391,13 @@ class ConsumoPendiente:
     coleccion_texto: str
     nombre_tabla: str
     nombre_campo: str
-    # 2026-10-05 (plantilla 2.0.0, hoja MetadataRepositorio): campos MUTABLES
-    # (no son parte de la clave natural). clase: texto libre, sin catalogo
-    # (decision del usuario). fecha_aprobacion: propia del consumo,
-    # independiente de la fecha de la fuente oficial (MetadataTecnica). Si
-    # cambian, la fila de gdd se actualiza en sitio (UPDATE), sin versionar.
+    # 2026-10-05 (plantilla 2.0.0, hoja MetadataRepositorio). clase: texto
+    # libre, sin catalogo (decision del usuario). fecha_aprobacion: propia
+    # del consumo, independiente de la fuente oficial.
+    # CAMBIO 2026-10-06 (regla R6 de los Office Scripts): `clase` pasa a ser
+    # PARTE DE LA CLAVE (el mismo destino en otra clase es otro registro).
+    # Un cambio de clase = baja logica del destino viejo + alta del nuevo.
+    # Solo fecha_aprobacion se actualiza en sitio (UPDATE), sin versionar.
     clase: str | None = None
     fecha_aprobacion: datetime.date | None = None
 
@@ -412,13 +414,14 @@ def mapear_atributo_fuente_consumo(registros: list[dict]) -> list[ConsumoPendien
     SheetConfig.columnas_obligatorias), asi que aqui una fila sin
     servidor/coleccion/tabla/campo es un error, no una fila a omitir.
 
-    Clave dentro del archivo: (codigo_dominio_atributo, servidor_foc,
-    coleccion_foc, tabla_bv_foc, nombre_campo_foc). Si la misma clave aparece
-    dos veces con clase o fecha_aprobada distintas, es ambiguo cual vale --
-    se rechaza con error (antes: la ultima fila ganaba en silencio). Un
-    duplicado exacto se toma una sola vez.
+    Clave dentro del archivo (regla R6, 2026-10-06): (codigo_dominio_atributo,
+    clase, servidor_foc, coleccion_foc, tabla_bv_foc, nombre_campo_foc) --
+    la misma que valida el Office Script. El mismo destino en OTRA clase es
+    un registro valido y distinto. Si la clave completa se repite con
+    fecha_aprobada distinta, es ambiguo cual vale: error. Un duplicado
+    exacto se toma una sola vez.
     """
-    vistos: dict[tuple[str, str, str, str, str], ConsumoPendiente] = {}
+    vistos: dict[tuple[str, str | None, str, str, str, str], ConsumoPendiente] = {}
     for fila in registros:
         codigo_dominio_atributo = str(fila["codigo_dominio_atributo"]).strip()
         codigo_dominio, codigo_atributo = _dividir_codigo_dominio_atributo(codigo_dominio_atributo)
@@ -443,7 +446,8 @@ def mapear_atributo_fuente_consumo(registros: list[dict]) -> list[ConsumoPendien
         elif isinstance(fecha, datetime.datetime):
             fecha = fecha.date()
 
-        clave = (codigo_dominio_atributo, servidor, coleccion, tabla, campo)
+        clase = _texto_o_none(fila.get("clase"))
+        clave = (codigo_dominio_atributo, clase, servidor, coleccion, tabla, campo)
         nuevo = ConsumoPendiente(
             codigo_dominio=codigo_dominio,
             codigo_atributo=codigo_atributo,
@@ -452,16 +456,16 @@ def mapear_atributo_fuente_consumo(registros: list[dict]) -> list[ConsumoPendien
             coleccion_texto=coleccion,
             nombre_tabla=tabla,
             nombre_campo=campo,
-            clase=_texto_o_none(fila.get("clase")),
+            clase=clase,
             fecha_aprobacion=fecha,
         )
         previo = vistos.get(clave)
         if previo is not None and previo != nuevo:
             raise ValueError(
                 f"MetadataRepositorio {codigo_dominio_atributo}: el destino "
-                f"{servidor}/{coleccion}/{tabla}/{campo} aparece mas de una vez con distinta "
-                f"clase o fecha_aprobada ('{previo.clase}' {previo.fecha_aprobacion} vs "
-                f"'{nuevo.clase}' {nuevo.fecha_aprobacion}) -- dejar una sola fila."
+                f"{servidor}/{coleccion}/{tabla}/{campo} con clase '{clase}' aparece mas de una "
+                f"vez con distinta fecha_aprobada ({previo.fecha_aprobacion} vs "
+                f"{nuevo.fecha_aprobacion}) -- dejar una sola fila."
             )
         vistos[clave] = nuevo
 

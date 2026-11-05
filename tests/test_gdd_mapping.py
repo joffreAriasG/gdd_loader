@@ -264,14 +264,27 @@ def test_consumo_duplicado_exacto_se_toma_una_vez():
     assert len(resultado) == 1
 
 
-def test_consumo_mismo_destino_con_clase_distinta_es_error():
-    """El caso del archivo real (AES-1 codigoUnicoEstablecimiento con dos
-    clases): si se repite el destino con otra clase o fecha, es ambiguo."""
-    with pytest.raises(ValueError, match="mas de una vez"):
+def test_consumo_mismo_destino_en_otra_clase_son_dos_registros():
+    """Regla R6 (2026-10-06): el mismo destino en otra clase es un registro
+    valido y distinto (antes era error)."""
+    resultado = mapear_atributo_fuente_consumo([
+        _fila_repositorio(clase="Registro alianzas y establecimientos"),
+        _fila_repositorio(clase="Registro_alianzas_establecimientos"),
+    ])
+    assert sorted(c.clase for c in resultado) == [
+        "Registro alianzas y establecimientos", "Registro_alianzas_establecimientos"]
+
+
+def test_consumo_mismo_destino_y_clase_con_otra_fecha_es_error():
+    with pytest.raises(ValueError, match="distinta fecha_aprobada"):
         mapear_atributo_fuente_consumo([
-            _fila_repositorio(clase="Registro alianzas y establecimientos"),
-            _fila_repositorio(clase="Registro_alianzas_establecimientos"),
+            _fila_repositorio(fecha_aprobada=datetime.date(2025, 6, 18)),
+            _fila_repositorio(fecha_aprobada=datetime.date(2026, 1, 1)),
         ])
+
+
+def test_consumo_duplicado_identico_se_toma_una_vez():
+    assert len(mapear_atributo_fuente_consumo([_fila_repositorio(), _fila_repositorio()])) == 1
 
 
 def test_consumo_distinta_coleccion_no_colapsa():

@@ -497,8 +497,8 @@ def test_fuente_secundaria_foc_existente_se_da_de_baja(monkeypatch):
     mock_repo.resolver_o_crear_bdd.return_value = 10
     mock_repo.campos_actuales.return_value = {}
     mock_repo.fuente_oficial_existentes.return_value = {
-        ("CAMPO_A", 10, True, ""): ExistenteVersionado(id=77, fecha_aprobacion=datetime.date(2025, 1, 31)),
-        ("COD_ARTICULO", 34, False, ""): ExistenteVersionado(
+        ("CAMPO_A", 10, True, "", ""): ExistenteVersionado(id=77, fecha_aprobacion=datetime.date(2025, 1, 31)),
+        ("COD_ARTICULO", 34, False, "", ""): ExistenteVersionado(
             id=88, fecha_aprobacion=datetime.date(2025, 1, 31)),
     }
 
@@ -588,9 +588,9 @@ def test_consumo_existente_sin_cambios_no_actualiza(monkeypatch):
     mock_repo.resolver_bdd_controlado.return_value = 10
     mock_repo.resolver_tabla_controlada.return_value = 300
     mock_repo.consumo_existentes.return_value = {
-        (10, 300, "ID_PRODUCTO"): ExistenteVersionado(id=88, fecha_aprobacion=None)
+        (10, 300, "ID_PRODUCTO", "Ventas"): ExistenteVersionado(id=88, fecha_aprobacion=None)
     }
-    mock_repo.campos_actuales.return_value = {"clase": "Ventas", "fecha_aprobacion": datetime.date(2025, 6, 18)}
+    mock_repo.campos_actuales.return_value = {"fecha_aprobacion": datetime.date(2025, 6, 18)}
 
     resultado = carga_gdd.ejecutar_merge_dominio(MagicMock(), staging_repo, "ADS")
 
@@ -601,19 +601,17 @@ def test_consumo_existente_sin_cambios_no_actualiza(monkeypatch):
     mock_repo.actualizar_atributo_fuente_consumo.assert_not_called()
 
 
-def test_consumo_existente_con_otra_clase_o_fecha_se_actualiza_en_sitio(monkeypatch):
-    """Decision 2026-10-05: si cambian clase o fecha_aprobacion, UPDATE de la
-    misma fila (mismo id), sin versionar ni bitacora."""
-    staging_repo = _staging(repositorio=[_fila_repositorio(
-        clase="Registro_alianzas_establecimientos", fecha_aprobada=datetime.date(2026, 8, 21))])
+def test_consumo_existente_con_otra_fecha_se_actualiza_en_sitio(monkeypatch):
+    """Misma clave (destino + clase) y otra fecha_aprobacion: UPDATE de la
+    misma fila (mismo id), solo fecha_aprobacion, sin versionar ni bitacora."""
+    staging_repo = _staging(repositorio=[_fila_repositorio(fecha_aprobada=datetime.date(2026, 8, 21))])
     mock_repo = _parchear_repo_gdd(monkeypatch)
     mock_repo.resolver_bdd_controlado.return_value = 10
     mock_repo.resolver_tabla_controlada.return_value = 300
     mock_repo.consumo_existentes.return_value = {
-        (10, 300, "ID_PRODUCTO"): ExistenteVersionado(id=88, fecha_aprobacion=None)
+        (10, 300, "ID_PRODUCTO", "Ventas"): ExistenteVersionado(id=88, fecha_aprobacion=None)
     }
-    # Fila migrada antes de 2026-10-05: sin clase ni fecha.
-    mock_repo.campos_actuales.return_value = {"clase": None, "fecha_aprobacion": None}
+    mock_repo.campos_actuales.return_value = {"fecha_aprobacion": None}
 
     resultado = carga_gdd.ejecutar_merge_dominio(MagicMock(), staging_repo, "ADS")
 
@@ -621,10 +619,43 @@ def test_consumo_existente_con_otra_clase_o_fecha_se_actualiza_en_sitio(monkeypa
     assert resultado.consumos_actualizados == 1
     args = mock_repo.actualizar_atributo_fuente_consumo.call_args.args
     assert args[1] == 88
-    assert args[2] == {"clase": "Registro_alianzas_establecimientos",
-                       "fecha_aprobacion": datetime.date(2026, 8, 21)}
+    assert args[2] == {"fecha_aprobacion": datetime.date(2026, 8, 21)}
     mock_repo.insertar_atributo_fuente_consumo.assert_not_called()
     mock_repo.eliminar_atributo_fuente_consumo.assert_not_called()
+
+
+def test_consumo_cambio_de_clase_es_baja_mas_alta(monkeypatch):
+    """Regla R6 (2026-10-06): clase es parte de la clave. Si un destino
+    cambia de clase, se da de baja la fila vieja y se inserta una nueva."""
+    staging_repo = _staging(repositorio=[_fila_repositorio(clase="Ventas_nueva")])
+    mock_repo = _parchear_repo_gdd(monkeypatch)
+    mock_repo.resolver_bdd_controlado.return_value = 10
+    mock_repo.resolver_tabla_controlada.return_value = 300
+    mock_repo.consumo_existentes.return_value = {
+        (10, 300, "ID_PRODUCTO", "Ventas"): ExistenteVersionado(id=88, fecha_aprobacion=None)
+    }
+
+    resultado = carga_gdd.ejecutar_merge_dominio(MagicMock(), staging_repo, "ADS")
+
+    assert resultado.ok, resultado.error
+    assert (resultado.consumos_eliminados, resultado.consumos_insertados) == (1, 1)
+    assert mock_repo.eliminar_atributo_fuente_consumo.call_args.args[1] == 88
+    assert mock_repo.insertar_atributo_fuente_consumo.call_args.args[1]["clase"] == "Ventas_nueva"
+    mock_repo.actualizar_atributo_fuente_consumo.assert_not_called()
+
+
+def test_consumo_mismo_destino_en_dos_clases_se_insertan_dos(monkeypatch):
+    staging_repo = _staging(repositorio=[_fila_repositorio(clase="Ventas"), _fila_repositorio(clase="Catalogo")])
+    mock_repo = _parchear_repo_gdd(monkeypatch)
+    mock_repo.resolver_bdd_controlado.return_value = 10
+    mock_repo.resolver_tabla_controlada.return_value = 300
+
+    resultado = carga_gdd.ejecutar_merge_dominio(MagicMock(), staging_repo, "ADS")
+
+    assert resultado.ok, resultado.error
+    assert resultado.consumos_insertados == 2
+    clases = sorted(c.args[1]["clase"] for c in mock_repo.insertar_atributo_fuente_consumo.call_args_list)
+    assert clases == ["Catalogo", "Ventas"]
 
 
 def test_consumo_ausente_del_excel_se_da_de_baja(monkeypatch):
@@ -1415,3 +1446,114 @@ def test_plan_remediacion_fila_sin_id_problema_aborta_antes_de_tocar_bd(monkeypa
     assert not resultado.ok
     mock_repo.plan_remediacion_existentes.assert_not_called()
     mock_repo.resolver_atributo_por_codigo.assert_not_called()
+
+
+
+# --- Regla T2 (2026-10-06, opcion B): formula_calculo distingue fuentes ---
+
+
+def _fuente_cli125(formula, **kw):
+    return _fila_metadata(codigo_dominio_atributo="ADS-1", servidor_fuente_oficial="PPRD",
+                          base_datos_fuente_oficial="T06TC002", tabla_fuente_oficial="-",
+                          nombre_campo_fuente_oficial="DEL_REGISTRO", formula_calculo=formula, **kw)
+
+
+def _repo_fuentes(monkeypatch, existentes=None, version=("1", None)):
+    mock_repo = _parchear_repo_gdd(monkeypatch, existentes_atributo=_ATRIBUTO_EXISTENTE)
+    mock_repo.resolver_o_crear_servidor.return_value = 1
+    mock_repo.resolver_o_crear_bdd.return_value = 10
+    mock_repo.fuente_oficial_existentes.return_value = existentes or {}
+    mock_repo.version_release_fuente_oficial.return_value = version
+    mock_repo.campos_actuales.return_value = {}
+    return mock_repo
+
+
+def test_misma_fuente_con_dos_formulas_se_insertan_dos(monkeypatch):
+    """Caso real CLI-125: misma fuente, formula distinta -> 2 registros."""
+    staging_repo = _staging(metadata=[_fuente_cli125("SI X=1 ENTONCES 'S'"), _fuente_cli125("SUMA(Y)")])
+    mock_repo = _repo_fuentes(monkeypatch)
+
+    resultado = carga_gdd.ejecutar_merge_dominio(MagicMock(), staging_repo, "ADS")
+
+    assert resultado.ok, resultado.error
+    assert resultado.fuentes_insertadas == 2
+    formulas = sorted(c.args[1]["formula_calculo"] for c in mock_repo.insertar_fuente_oficial.call_args_list)
+    assert formulas == ["SI X=1 ENTONCES 'S'", "SUMA(Y)"]
+
+
+def test_misma_fuente_y_formula_con_otra_longitud_es_error(monkeypatch):
+    staging_repo = _staging(metadata=[_fuente_cli125("SUMA(Y)", longitud_campo_fuente_oficial="10"),
+                                      _fuente_cli125("SUMA(Y)", longitud_campo_fuente_oficial="20")])
+    _repo_fuentes(monkeypatch)
+
+    resultado = carga_gdd.ejecutar_merge_dominio(MagicMock(), staging_repo, "ADS")
+
+    assert not resultado.ok
+    assert "misma formula_calculo" in resultado.error
+
+
+def test_misma_fuente_duplicado_identico_se_toma_una_vez(monkeypatch):
+    staging_repo = _staging(metadata=[_fuente_cli125("SUMA(Y)"), _fuente_cli125("SUMA(Y)")])
+    mock_repo = _repo_fuentes(monkeypatch)
+
+    resultado = carga_gdd.ejecutar_merge_dominio(MagicMock(), staging_repo, "ADS")
+
+    assert resultado.ok, resultado.error
+    assert mock_repo.insertar_fuente_oficial.call_count == 1
+
+
+def test_formula_corregida_con_fecha_mas_reciente_es_nueva_version(monkeypatch):
+    """Opcion B: 1 fuente en gdd y 1 en el Excel con la misma clave base son
+    la misma fuente aunque cambie la formula -> REEMPLAZAR (version + 1)."""
+    staging_repo = _staging(metadata=[_fuente_cli125("SUMA(Y) / 2", fecha_aprobada="01-03-2026")])
+    mock_repo = _repo_fuentes(monkeypatch, version=("2", "R1"), existentes={
+        ("DEL_REGISTRO", 10, True, "", "SUMA(Y)"): ExistenteVersionado(id=77, fecha_aprobacion=datetime.date(2025, 1, 31)),
+    })
+
+    resultado = carga_gdd.ejecutar_merge_dominio(MagicMock(), staging_repo, "ADS")
+
+    assert resultado.ok, resultado.error
+    assert (resultado.fuentes_reemplazadas, resultado.fuentes_insertadas, resultado.fuentes_eliminadas) == (1, 0, 0)
+    campos = mock_repo.insertar_fuente_oficial.call_args.args[1]
+    assert campos["version"] == "3" and campos["formula_calculo"] == "SUMA(Y) / 2"
+    assert mock_repo.eliminar_fuente_oficial.call_args.args[1] == 77
+
+
+def test_formula_corregida_con_la_misma_fecha_actualiza_en_sitio(monkeypatch):
+    staging_repo = _staging(metadata=[_fuente_cli125("SUMA(Y) / 2")])
+    mock_repo = _repo_fuentes(monkeypatch, existentes={
+        ("DEL_REGISTRO", 10, True, "", "SUMA(Y)"): ExistenteVersionado(id=77, fecha_aprobacion=datetime.date(2025, 1, 31)),
+    })
+    mock_repo.campos_actuales.return_value = {"formula_calculo": "SUMA(Y)"}
+
+    resultado = carga_gdd.ejecutar_merge_dominio(MagicMock(), staging_repo, "ADS")
+
+    assert resultado.ok, resultado.error
+    assert resultado.fuentes_actualizadas == 1
+    assert mock_repo.actualizar_fuente_oficial.call_args.args[1] == 77
+    mock_repo.insertar_fuente_oficial.assert_not_called()
+
+
+def test_una_fuente_en_gdd_y_dos_formulas_en_excel_conserva_la_que_coincide(monkeypatch):
+    """gdd tenia 1 (antes ganaba la ultima); el Excel trae 2 formulas: la que
+    coincide se mantiene (mismo id) y la otra se inserta."""
+    staging_repo = _staging(metadata=[_fuente_cli125("SUMA(Y)"), _fuente_cli125("PROMEDIO(Y)")])
+    mock_repo = _repo_fuentes(monkeypatch, existentes={
+        ("DEL_REGISTRO", 10, True, "", "SUMA(Y)"): ExistenteVersionado(id=77, fecha_aprobacion=datetime.date(2025, 1, 31)),
+    })
+
+    resultado = carga_gdd.ejecutar_merge_dominio(MagicMock(), staging_repo, "ADS")
+
+    assert resultado.ok, resultado.error
+    assert resultado.fuentes_insertadas == 1 and resultado.fuentes_eliminadas == 0
+    assert mock_repo.insertar_fuente_oficial.call_args.args[1]["formula_calculo"] == "PROMEDIO(Y)"
+
+
+def test_emparejar_fuentes_par_unico_y_multiples():
+    base = ("C", 10, True, "")
+    ex = {base + ("F1",): "e1", ("D", 10, True, "") + ("F",): "e2", ("D", 10, True, "") + ("G",): "e3"}
+    en = {base + ("F2",): "n1", ("D", 10, True, "") + ("F",): "n2"}
+    ex_plan, en_plan = carga_gdd._emparejar_fuentes(ex, en)
+    assert ex_plan[(base, carga_gdd._PAR_UNICO)] == "e1" and en_plan[(base, carga_gdd._PAR_UNICO)] == "n1"
+    assert ex_plan[(("D", 10, True, ""), "G")] == "e3"
+    assert en_plan[(("D", 10, True, ""), "F")] == "n2" and ex_plan[(("D", 10, True, ""), "F")] == "e2"

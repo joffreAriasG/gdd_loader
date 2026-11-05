@@ -266,9 +266,16 @@ def _resolver_id_bdd(conn, pendiente: FuenteOficialPendiente) -> int:
     return id_bdd
 
 
-def _clave_fuente(pendiente: FuenteOficialPendiente, id_bdd: int) -> tuple[str, int, bool, str]:
-    """Clave natural real de una fuente oficial dentro de un mismo atributo:
-    (nombre_campo, id_bdd, es_fuente_primaria, nombre_tabla).
+def _clave_fuente(pendiente: FuenteOficialPendiente, id_bdd: int) -> tuple[str, int, bool, str, str]:
+    """Clave completa de una fuente oficial dentro de un mismo atributo:
+    (nombre_campo, id_bdd, es_fuente_primaria, nombre_tabla, formula_calculo).
+
+    CAMBIO 2026-10-06 (regla T2, opcion B acordada con el usuario): la misma
+    fuente (servidor/base/tabla/campo) con OTRA formula es otro registro
+    (caso real CLI-125). Para no perder el versionado cuando solo se corrige
+    la formula, el emparejamiento con gdd usa la formula SOLO si hace falta
+    para distinguir -- ver _emparejar_fuentes. Los primeros 4 elementos son
+    la "clave base" (sin formula).
 
     CAMBIO 2026-10-05 (plantilla 2.0.0): sin `clase` -- ya no viene en
     MetadataTecnica (paso a MetadataRepositorio / fuente de consumo). Debe
@@ -288,7 +295,51 @@ def _clave_fuente(pendiente: FuenteOficialPendiente, id_bdd: int) -> tuple[str, 
     94 (perdida silenciosa de 116); esta clave no tiene colisiones en esos
     mismos datos.
     """
-    return (pendiente.nombre_campo, id_bdd, pendiente.es_fuente_primaria, pendiente.nombre_tabla or "")
+    return (pendiente.nombre_campo, id_bdd, pendiente.es_fuente_primaria, pendiente.nombre_tabla or "",
+            pendiente.formula_calculo or "")
+
+
+_PAR_UNICO = "__par_unico__"
+
+
+def _emparejar_fuentes(existentes: dict, entrantes: dict) -> tuple[dict, dict]:
+    """Opcion B (2026-10-06). Recibe existentes / entrantes por clave
+    completa (con formula, ver _clave_fuente) y devuelve los dos dicts por
+    "clave de plan" para calcular_plan_merge:
+
+    - Si una clave base (sin formula) tiene exactamente UNA fuente en gdd y
+      UNA en el Excel, son la misma fuente aunque cambie la formula: clave de
+      plan (base, _PAR_UNICO). Asi una formula corregida sigue el versionado
+      normal (ACTUALIZAR con la misma fecha, REEMPLAZAR con fecha mas reciente).
+    - En cualquier otro caso (varias formulas en el Excel o en gdd, o la
+      fuente solo esta de un lado) se empareja por clave completa: cada
+      formula es un registro (INSERTAR / ELIMINAR / ACTUALIZAR por formula).
+    Funcion pura.
+    """
+    def base(clave):
+        return clave[:4]
+
+    por_base_ex: dict = {}
+    for clave in existentes:
+        por_base_ex.setdefault(base(clave), []).append(clave)
+    por_base_en: dict = {}
+    for clave in entrantes:
+        por_base_en.setdefault(base(clave), []).append(clave)
+
+    ex_plan: dict = {}
+    en_plan: dict = {}
+    for b in set(por_base_ex) | set(por_base_en):
+        ex = por_base_ex.get(b, [])
+        en = por_base_en.get(b, [])
+        if len(ex) == 1 and len(en) == 1:
+            ex_plan[(b, _PAR_UNICO)] = existentes[ex[0]]
+            en_plan[(b, _PAR_UNICO)] = entrantes[en[0]]
+        else:
+            for c in ex:
+                ex_plan[(b, c[4])] = existentes[c]
+            for c in en:
+                en_plan[(b, c[4])] = entrantes[c]
+    return ex_plan, en_plan
 
 
 def _resolver_campos_fuente(
@@ -358,10 +409,12 @@ def _resolver_destino_consumo(conn, pendiente: ConsumoPendiente) -> tuple[int, i
     return id_bdd, id_tabla
 
 
-def _clave_consumo(pendiente: ConsumoPendiente, id_bdd: int, id_tabla: int) -> tuple[int, int, str]:
+def _clave_consumo(pendiente: ConsumoPendiente, id_bdd: int, id_tabla: int) -> tuple[int, int, str, str]:
     """Clave natural real de un destino de consumo dentro de un mismo
-    atributo: (id_bdd, id_tabla, nombre_campo)."""
-    return (id_bdd, id_tabla, pendiente.nombre_campo)
+    atributo: (id_bdd, id_tabla, nombre_campo, clase). clase desde el
+    2026-10-06 (regla R6): un cambio de clase es baja + alta, no UPDATE.
+    Debe coincidir con gdd_repository.consumo_existentes."""
+    return (id_bdd, id_tabla, pendiente.nombre_campo, pendiente.clase or "")
 
 
 def _resolver_campos_consumo(
@@ -372,14 +425,16 @@ def _resolver_campos_consumo(
         "id_bdd": id_bdd,
         "id_tabla": id_tabla,
         "nombre_campo": pendiente.nombre_campo,
+        "clase": pendiente.clase,
         **_campos_mutables_consumo(pendiente),
     }
 
 
 def _campos_mutables_consumo(pendiente: ConsumoPendiente) -> dict:
-    """clase / fecha_aprobacion (2026-10-05): lo unico que ACTUALIZAR puede
-    cambiar de una fila de consumo existente (ver repo.CAMPOS_MUTABLES_CONSUMO)."""
-    return {"clase": pendiente.clase, "fecha_aprobacion": pendiente.fecha_aprobacion}
+    """fecha_aprobacion: lo unico que ACTUALIZAR puede cambiar de una fila de
+    consumo existente (ver repo.CAMPOS_MUTABLES_CONSUMO). clase salio de aqui
+    el 2026-10-06: es parte de la clave."""
+    return {"fecha_aprobacion": pendiente.fecha_aprobacion}
 
 
 def _siguiente_version(version_actual: str | None) -> str:
@@ -536,27 +591,28 @@ def ejecutar_merge_dominio(
                 # guarda por clave para no tener que re-resolverlo al
                 # insertar/actualizar/reemplazar.
                 entrantes_fuente: dict = {}
-                id_bdd_por_clave: dict = {}
                 for f in fuentes:
                     id_bdd_f = _resolver_id_bdd(conn, f)
                     clave_f = _clave_fuente(f, id_bdd_f)
                     previa = entrantes_fuente.get(clave_f)
                     if previa is not None and previa[0] != f:
-                        # 2026-10-05: sin `clase` en la clave, dos filas de
-                        # MetadataTecnica que antes solo se diferenciaban por
-                        # clase pasan a ser la misma fuente. Si ademas difieren
-                        # en otro campo (fecha, longitud...), no hay forma de
-                        # saber cual vale: se rechaza en vez de quedarse con la
-                        # ultima en silencio. Duplicado exacto: se toma una vez.
+                        # Regla T2 (2026-10-06): misma fuente Y misma formula
+                        # con cualquier otro valor distinto (fecha, longitud,
+                        # lista...) -> error. Otra formula = otro registro
+                        # (clave distinta, no entra aqui). Duplicado exacto:
+                        # se toma una vez.
                         raise ValueError(
                             f"MetadataTecnica {codigo_dominio_atributo}: la fuente oficial "
                             f"{f.servidor_texto}/{f.base_datos_texto}/{f.nombre_tabla}/{f.nombre_campo} "
-                            "aparece mas de una vez con valores distintos -- dejar una sola fila."
+                            "aparece mas de una vez con la misma formula_calculo y otros valores "
+                            "distintos -- dejar una sola fila."
                         )
                     entrantes_fuente[clave_f] = (f, f.fecha_aprobacion)
-                    id_bdd_por_clave[clave_f] = id_bdd_f
 
-                plan_fuente = calcular_plan_merge(existentes_fuente, entrantes_fuente)
+                existentes_plan, entrantes_plan = _emparejar_fuentes(existentes_fuente, entrantes_fuente)
+                # id_bdd es el 2do elemento de la clave base (clave de plan = (base, x)).
+                id_bdd_por_clave = {k: k[0][1] for k in entrantes_plan}
+                plan_fuente = calcular_plan_merge(existentes_plan, entrantes_plan)
 
                 for op in plan_fuente:
                     if op.accion == Accion.INSERTAR:
@@ -619,8 +675,8 @@ def ejecutar_merge_dominio(
                             "%s (campo=%s, tabla=%s): fecha_aprobacion entrante es anterior "
                             "a la ya registrada -- se omite",
                             codigo_dominio_atributo,
-                            op.clave[0],
-                            op.clave[3],
+                            op.clave[0][0],
+                            op.clave[0][3],
                         )
                         resultado.fuentes_omitidas_fecha_retrocede += 1
                         repo.registrar_bitacora(
@@ -658,9 +714,9 @@ def ejecutar_merge_dominio(
                         repo.insertar_atributo_fuente_consumo(conn, campos)
                         resultado.consumos_insertados += 1
                     elif op.accion == Accion.ACTUALIZAR:
-                        # La clave (id_bdd, id_tabla, nombre_campo) coincide;
-                        # solo pueden cambiar clase / fecha_aprobacion
-                        # (2026-10-05). UPDATE en sitio si cambio algo.
+                        # La clave (id_bdd, id_tabla, nombre_campo, clase)
+                        # coincide; solo puede cambiar fecha_aprobacion.
+                        # UPDATE en sitio si cambio.
                         campos_mut = _campos_mutables_consumo(op.entrante)
                         actuales = repo.campos_actuales(
                             conn, "atributo_fuente_consumo", op.id_existente, campos_mut.keys()

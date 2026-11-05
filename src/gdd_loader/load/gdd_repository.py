@@ -500,9 +500,14 @@ def eliminar_atributo(conn: Connection, id_atributo: int) -> None:
 
 def fuente_oficial_existentes(
     conn: Connection, id_atributo: int
-) -> dict[tuple[str, int, bool, str], ExistenteVersionado]:
-    """Clave natural real: (nombre_campo, id_bdd, es_fuente_primaria,
-    nombre_tabla). nombre_tabla agregado 2026-10-01 (ver
+) -> dict[tuple[str, int, bool, str, str], ExistenteVersionado]:
+    """Clave completa: (nombre_campo, id_bdd, es_fuente_primaria,
+    nombre_tabla, formula_calculo). formula_calculo entra el 2026-10-06
+    (regla T2): la misma fuente con otra formula es otro registro. El
+    emparejamiento con lo que trae el Excel (formula solo cuando hace falta
+    para distinguir) lo hace carga_gdd._emparejar_fuentes; aqui se devuelve
+    la clave completa. Formula NULL se compara como "".
+ nombre_tabla agregado 2026-10-01 (ver
     carga_gdd._clave_fuente); requiere la migracion
     db/migraciones/20261001_fuente_oficial_nombre_tabla.sql.
 
@@ -522,18 +527,21 @@ def fuente_oficial_existentes(
     """
     filas = conn.execute(
         text(
-            "SELECT id, nombre_campo, id_bdd, es_fuente_primaria, nombre_tabla, fecha_aprobacion "
+            "SELECT id, nombre_campo, id_bdd, es_fuente_primaria, nombre_tabla, formula_calculo, "
+            "fecha_aprobacion "
             "FROM gdd.atributo_fuente_oficial WHERE id_atributo = :id_atributo AND activo = 1"
         ),
         {"id_atributo": id_atributo},
     ).all()
-    resultado: dict[tuple[str, int, bool, str], ExistenteVersionado] = {}
+    resultado: dict[tuple[str, int, bool, str, str], ExistenteVersionado] = {}
     for fila in filas:
-        clave = (fila.nombre_campo, fila.id_bdd, bool(fila.es_fuente_primaria), fila.nombre_tabla or "")
+        clave = (fila.nombre_campo, fila.id_bdd, bool(fila.es_fuente_primaria), fila.nombre_tabla or "",
+                 (fila.formula_calculo or "").strip())
         if clave in resultado:
             raise ValueError(
                 f"gdd.atributo_fuente_oficial: id_atributo={id_atributo} tiene filas activas "
-                f"duplicadas para (nombre_campo, id_bdd, es_fuente_primaria, nombre_tabla)={clave} "
+                f"duplicadas para (nombre_campo, id_bdd, es_fuente_primaria, nombre_tabla, "
+                f"formula)={clave[:4]} "
                 f"(ids {resultado[clave].id} y {fila.id}) -- correr "
                 "db/migraciones/20261005_metadata_repositorio.sql antes de cargar."
             )
@@ -944,27 +952,40 @@ def eliminar_plan_remediacion(conn: Connection, id_plan: int) -> None:
 # mismo criterio que respaldo/plan_remediacion. Requiere
 # db/migraciones/20261005_metadata_repositorio.sql.
 
-CAMPOS_MUTABLES_CONSUMO = ("clase", "fecha_aprobacion")
+# clase dejo de ser mutable el 2026-10-06 (es parte de la clave natural).
+CAMPOS_MUTABLES_CONSUMO = ("fecha_aprobacion",)
 
 
-def consumo_existentes(conn: Connection, id_atributo: int) -> dict[tuple[int, int, str], ExistenteVersionado]:
+def consumo_existentes(
+    conn: Connection, id_atributo: int
+) -> dict[tuple[int, int, str, str], ExistenteVersionado]:
     """Filas activas de gdd.atributo_fuente_consumo de un atributo, por
-    (id_bdd, id_tabla, nombre_campo) -- la clave natural completa
-    (id_atributo ya acota la consulta). fecha_aprobacion siempre None en el
-    ExistenteVersionado -- la fecha del consumo es un campo mutable, no
-    dispara versionado (se compara con campos_actuales).
+    (id_bdd, id_tabla, nombre_campo, clase) -- la clave natural completa
+    (id_atributo ya acota la consulta). clase entra a la clave el 2026-10-06
+    (regla R6): mismo destino en otra clase = otro registro; clase NULL se
+    compara como "". fecha_aprobacion siempre None en el ExistenteVersionado
+    -- la fecha del consumo es un campo mutable, no dispara versionado.
+    Dos filas activas con la misma clave: error (el merge no podria saber
+    cual dar de baja).
     """
     filas = conn.execute(
         text(
-            "SELECT id, id_bdd, id_tabla, nombre_campo "
+            "SELECT id, id_bdd, id_tabla, nombre_campo, clase "
             "FROM gdd.atributo_fuente_consumo WHERE id_atributo = :id_atributo AND activo = 1"
         ),
         {"id_atributo": id_atributo},
     ).all()
-    return {
-        (f.id_bdd, f.id_tabla, f.nombre_campo): ExistenteVersionado(id=f.id, fecha_aprobacion=None)
-        for f in filas
-    }
+    resultado: dict[tuple[int, int, str, str], ExistenteVersionado] = {}
+    for f in filas:
+        clave = (f.id_bdd, f.id_tabla, f.nombre_campo, (f.clase or "").strip())
+        if clave in resultado:
+            raise ValueError(
+                f"gdd.atributo_fuente_consumo: id_atributo={id_atributo} tiene filas activas "
+                f"duplicadas para (id_bdd, id_tabla, nombre_campo, clase)={clave} "
+                f"(ids {resultado[clave].id} y {f.id})."
+            )
+        resultado[clave] = ExistenteVersionado(id=f.id, fecha_aprobacion=None)
+    return resultado
 
 
 def insertar_atributo_fuente_consumo(conn: Connection, campos: dict) -> int:

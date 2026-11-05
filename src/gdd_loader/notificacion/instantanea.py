@@ -53,6 +53,12 @@ class EntidadMinuta:
     # (subconjunto legible: identificacion + campos principales, para que la
     # tabla quepa en el ancho de un correo).
     columnas_tabla: dict[str, str] = field(default_factory=dict)
+    # 2026-10-06: columna que se agrega a la clave SOLO cuando dos filas de
+    # la misma foto comparten clave (ej. la misma fuente oficial con dos
+    # formulas, caso CLI-125). Si no hay choque, la clave queda sin ella y un
+    # cambio de ese campo se ve como "anterior -> nuevo" (igual que el merge,
+    # carga_gdd._emparejar_fuentes).
+    desempate: str | None = None
 
 
 # --- Normalizacion de valores a texto -------------------------------------------
@@ -164,6 +170,7 @@ FUENTES_OFICIALES = EntidadMinuta(
     # clave natural que carga_gdd._clave_fuente) -- ahora es de consumo.
     clave=("codigo_atributo", "servidor", "base_datos", "tabla", "nombre_campo",
            "es_fuente_primaria"),
+    desempate="formula_calculo",
     etiqueta=lambda f: _con(
         f"Atributo {f['codigo_atributo']}",
         "/".join(p for p in (f["servidor"], f["base_datos"], f["tabla"], f["nombre_campo"]) if p)
@@ -188,13 +195,14 @@ FUENTES_OFICIALES = EntidadMinuta(
         "es_fuente_primaria": "Primaria",
         "tipo_campo": "Tipo de campo",
         "longitud_campo": "Longitud",
+        "formula_calculo": "Fórmula",
         "version": "Versión",
     },
 )
 
-# 2026-10-05 (plantilla 2.0.0, hoja MetadataRepositorio): clase y
-# fecha_aprobacion son campos mutables -- la minuta los muestra como
-# "anterior -> nuevo" cuando cambian (el merge los actualiza en sitio).
+# 2026-10-05 (plantilla 2.0.0, hoja MetadataRepositorio). Desde 2026-10-06
+# (regla R6) clase es parte de la clave: un cambio de clase se ve como
+# "dado de baja" + "nuevo". fecha_aprobacion sigue como anterior -> nuevo.
 FUENTES_CONSUMO = EntidadMinuta(
     nombre="Fuentes de consumo",
     sql="""
@@ -208,13 +216,13 @@ FUENTES_CONSUMO = EntidadMinuta(
         JOIN gdd.servidor_fuente sv        ON sv.id = bd.id_servidor
         WHERE a.codigo_dominio = :cod AND a.activo = 1 AND c.activo = 1
     """,
-    clave=("codigo_atributo", "servidor", "base_datos", "tabla", "nombre_campo"),
+    clave=("codigo_atributo", "servidor", "base_datos", "tabla", "nombre_campo", "clase"),
     etiqueta=lambda f: _con(
         f"Atributo {f['codigo_atributo']}",
         "/".join(p for p in (f["servidor"], f["base_datos"], f["tabla"], f["nombre_campo"]) if p),
+        f"clase {f['clase']}" if f.get("clase") else "",
     ),
     campos={
-        "clase": "Clase",
         "fecha_aprobacion": "Fecha de aprobación",
     },
     columnas_tabla={
@@ -376,12 +384,23 @@ ENTIDADES: tuple[EntidadMinuta, ...] = (
 
 def construir_registros(entidad: EntidadMinuta, filas) -> dict[tuple, Registro]:
     """Filas (mappings) de la consulta -> {clave natural: Registro}. Pura, testeable."""
-    resultado: dict[tuple, Registro] = {}
-    for fila in filas:
-        texto = {k: a_texto(v) for k, v in dict(fila).items()}
+    textos = [{k: a_texto(v) for k, v in dict(fila).items()} for fila in filas]
+    conteo: dict[tuple, int] = {}
+    for texto in textos:
         clave = tuple(texto[c] for c in entidad.clave)
+        conteo[clave] = conteo.get(clave, 0) + 1
+
+    resultado: dict[tuple, Registro] = {}
+    for texto in textos:
+        clave = tuple(texto[c] for c in entidad.clave)
+        etiqueta = entidad.etiqueta(texto)
+        if entidad.desempate and conteo[clave] > 1:
+            valor = texto.get(entidad.desempate, "")
+            clave = clave + (valor,)
+            corto = valor if len(valor) <= 40 else valor[:40] + "…"
+            etiqueta = f"{etiqueta} · fórmula: {corto or '(vacía)'}"
         resultado[clave] = Registro(
-            etiqueta=entidad.etiqueta(texto),
+            etiqueta=etiqueta,
             campos={etq: texto.get(col, "") for col, etq in entidad.campos.items()},
             tabla={etq: texto.get(col, "") for col, etq in entidad.columnas_tabla.items()},
         )
