@@ -274,7 +274,7 @@ vis-network 9.1.9 va incrustado (`exportar/recursos`, licencia MIT).
 
 ## Sitio de consulta por dominio (v0.10.0)
 
-HTML autocontenido (sin internet ni servidor) con menú lateral y cinco secciones por dominio.
+HTML autocontenido (sin internet ni servidor) con menú lateral y seis secciones.
 **Solo lectura**: lee `gdd.*` (registros activos); no usa staging.
 
 1. **Dominio y estructura**: datos del dominio, responsables (hoja Estructura) y respaldos.
@@ -288,6 +288,10 @@ HTML autocontenido (sin internet ni servidor) con menú lateral y cinco seccione
    elegido con sus vecinos), con la calidad de vínculos. Usa la vista `gdd.v_relacion_atributo`
    (migración `20261105_vistas_relacion_dominio.sql`); si no existe, el sitio se genera igual y la
    sección lo informa.
+6. **Indicadores** (v0.11.0): puntaje de fuente oficial por dominio (parte de 100; cada atributo sin
+   fuente oficial resta 5 si es crítico y está marcado en Estructura, 3 si solo es crítico y 1 en otro
+   caso; mínimo 0), atributos críticos / no críticos con y sin fuente, estructura completa (roles 1 a 4),
+   fuentes de consumo, respaldos, glosario y vínculos. Cada gráfico tiene su vista de tabla.
 
 `python -m gdd_loader.sitio_cli --salida "C:\ruta\carpeta"` genera `sitio_dominios_AAAAMMDD_HHMM.html`.
 El archivo contiene valores reales, incluidos los nombres de los responsables: compartirlo solo con

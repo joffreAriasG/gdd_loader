@@ -240,6 +240,74 @@ def test_descarga_excel_de_atributos_incluida():
     assert not re.search(r'(src|href)="https?://', html)  # sigue sin recursos externos
 
 
+# --- indicadores de fuente oficial (v0.11.0) -------------------------------------------------------
+
+
+def _attr_ind(cod, criticidad, estructura, con_fuente):
+    a = _attr("ADS", cod)
+    a.update(criticidad=criticidad, estructura=estructura)
+    return a, ([_fo("ADS", cod, f"C{cod}")] if con_fuente else [])
+
+
+def _modelo_ind(casos, roles=(1, 2, 3, 4), relaciones=None):
+    attrs, fuentes = [], []
+    for c in casos:
+        a, f = _attr_ind(*c)
+        attrs.append(a)
+        fuentes += f
+    datos = _datos(atributos=attrs, fuentes_oficiales=fuentes, fuentes_consumo=[],
+                   responsables=[{"codigo_dominio": "ADS", "id_rol": r, "rol": f"Rol {r}", "area": None,
+                                  "codigo_plaza": str(r), "nombre_plaza": None, "nombre_responsable": None,
+                                  "fecha_aprobada": None} for r in roles],
+                   roles=[{"id": i, "nombre_rol": f"Rol {i}"} for i in range(1, 6)])
+    return construir_modelo(datos, relaciones)
+
+
+def test_puntaje_penaliza_5_3_1_solo_a_los_atributos_sin_fuente():
+    m = _modelo_ind([
+        (1, "Crítico", True, False),      # critico + estructura, sin fuente -> 5
+        (2, "Crítico", False, False),     # solo critico, sin fuente        -> 3
+        (3, "No crítico", False, False),  # otro, sin fuente                -> 1
+        (4, "No crítico", True, False),   # no critico con estructura       -> 1 (supuesto: "otro caso")
+        (5, "Crítico", True, True),       # con fuente oficial              -> 0
+    ])
+    i = m["dominios"][0]["indicadores"]
+    assert i["penalizacion"] == 10 and i["puntaje"] == 90
+    assert i["detalle_penalizacion"] == {"critico_estructura": {"n": 1, "puntos": 5},
+                                         "critico": {"n": 1, "puntos": 3}, "otro": {"n": 2, "puntos": 2}}
+    assert (i["criticos"], i["criticos_con_fo"], i["no_criticos"], i["no_criticos_con_fo"]) == (3, 1, 2, 0)
+    assert [x["codigo_atributo"] for x in i["sin_fuente"]] == ["1", "2", "3", "4"]  # mayor resta primero
+
+
+def test_puntaje_tiene_piso_cero_y_dominio_sin_atributos_no_tiene_puntaje():
+    m = _modelo_ind([(n, "Crítico", True, False) for n in range(1, 31)])  # 30 x 5 = 150
+    assert m["dominios"][0]["indicadores"]["puntaje"] == 0
+    vacio = construir_modelo({"dominios": [_dom("RAE")]})["dominios"][0]["indicadores"]
+    assert vacio["puntaje"] is None and vacio["pct_con_fo"] is None
+    assert vacio["roles_faltantes"] == [1, 2, 3, 4] and vacio["estructura_completa"] is False
+
+
+def test_estructura_completa_con_roles_1_a_4():
+    completo = _modelo_ind([(1, "Crítico", False, True)], roles=(1, 2, 3, 4, 5))["dominios"][0]["indicadores"]
+    assert completo["estructura_completa"] and completo["roles_faltantes"] == []
+    falta = _modelo_ind([(1, "Crítico", False, True)], roles=(1, 3, 4))["dominios"][0]["indicadores"]
+    assert not falta["estructura_completa"] and falta["roles_faltantes"] == [2]
+    m = _modelo_ind([(1, "Crítico", False, True)])
+    assert [r["nombre"] for r in m["resumen"]["indicadores"]["roles_requeridos"]] == ["Rol 1", "Rol 2", "Rol 3", "Rol 4"]
+
+
+def test_vinculos_resueltos_y_pendientes_por_dominio():
+    i = _modelo_ind([(1, "Crítico", False, True)], relaciones=_grafo_sintetico())["dominios"][0]["indicadores"]
+    assert (i["vinculos_resueltos"], i["vinculos_pendientes"]) == (1, 0)
+    sin_rel = _modelo_ind([(1, "Crítico", False, True)])["dominios"][0]["indicadores"]
+    assert sin_rel["vinculos_resueltos"] is None
+
+
+def test_indicadores_en_el_menu():
+    html = generar_html(_modelo_ind([(1, "Crítico", False, True)]), "x")
+    assert '{id:"indicadores", titulo:"Indicadores"}' in html and "function vistaIndicadores" in html
+
+
 def test_resolver_ruta_salida():
     ahora = datetime.datetime(2026, 11, 9, 21, 5)
     assert resolver_ruta_salida("C:/x", ahora) == Path("C:/x") / "sitio_dominios_20261109_2105.html"
@@ -252,9 +320,9 @@ def test_leer_todo_ejecuta_una_consulta_por_entidad():
     fila._mapping = {"codigo_dominio": "ADS"}
     conn.execute.return_value = [fila]
     datos = sitio_repository.leer_todo(conn)
-    assert set(datos) == {"dominios", "responsables", "respaldos", "atributos",
+    assert set(datos) == {"dominios", "roles", "responsables", "respaldos", "atributos",
                           "fuentes_oficiales", "fuentes_consumo", "investigacion"}
-    assert conn.execute.call_count == 7
+    assert conn.execute.call_count == 8
     assert datos["dominios"] == [{"codigo_dominio": "ADS"}]
 
 

@@ -22,7 +22,7 @@ SQL_DOMINIOS = text("""
 """)
 
 SQL_RESPONSABLES = text("""
-    SELECT d.codigo_dominio, cr.nombre_rol AS rol, r.area, r.codigo_plaza, r.nombre_plaza,
+    SELECT d.codigo_dominio, r.id_rol, cr.nombre_rol AS rol, r.area, r.codigo_plaza, r.nombre_plaza,
            r.nombre_responsable, r.fecha_aprobada
     FROM gdd.dominio_responsable r
     JOIN gdd.dominio_dato d  ON d.id = r.id_dominio
@@ -96,8 +96,12 @@ SQL_INVESTIGACION = text("""
     WHERE i.activo = 1
 """)
 
+# Catalogo de roles (indicador "estructura completa": roles requeridos por id, ver sitio_dominios).
+SQL_ROLES = text("SELECT id, nombre_rol FROM gdd.cat_rol")
+
 CONSULTAS = {
     "dominios": SQL_DOMINIOS,
+    "roles": SQL_ROLES,
     "responsables": SQL_RESPONSABLES,
     "respaldos": SQL_RESPALDOS,
     "atributos": SQL_ATRIBUTOS,

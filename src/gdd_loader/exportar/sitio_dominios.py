@@ -21,6 +21,12 @@ servidor) con menu lateral y tres secciones por dominio:
                                   que lee la vista gdd.v_relacion_atributo. Si la
                                   vista no existe, la seccion lo informa y el resto
                                   del sitio funciona igual.
+  6. Indicadores (v0.11.0)     -> puntaje de fuente oficial por dominio (ver
+                                  PENALIZACION), atributos criticos / no criticos con
+                                  y sin fuente oficial, estructura completa (roles
+                                  ROLES_REQUERIDOS), fuentes de consumo, respaldos,
+                                  glosario y vinculos. Graficos en HTML segun el tipo
+                                  de variable, cada uno con su vista de tabla.
 
 Solo lectura: se arma con lo que load/sitio_repository.leer_todo devuelve de
 gdd.* (registros activos). construir_modelo es pura (testeable sin base).
@@ -50,6 +56,106 @@ def es_termino(clasificacion: str | None) -> bool:
     tildes ni mayusculas. Esos registros van a la seccion 'Glosario de términos'."""
     base = unicodedata.normalize("NFD", clasificacion or "")
     return "".join(c for c in base if unicodedata.category(c) != "Mn").strip().lower() == "termino"
+
+
+# --- Indicadores (pestana "Indicadores", 2026-11-10) -------------------------------------------
+# Puntaje de fuente oficial del dominio: parte de 100 y cada atributo activo SIN fuente oficial
+# activa resta puntos (regla definida por el usuario el 2026-11-10):
+#   critico y marcado en "Estructura" -> 5 | solo critico -> 3 | cualquier otro caso -> 1
+# [SUPUESTO] "otro caso" incluye al no critico marcado en Estructura. Piso 0.
+PENALIZACION = {"critico_estructura": 5, "critico": 3, "otro": 1}
+# Estructura completa: el dominio tiene responsables activos con estos roles (id de cat_rol, regla del
+# usuario). OJO: los id pueden diferir entre ambientes; el sitio muestra el nombre de cada rol.
+ROLES_REQUERIDOS = (1, 2, 3, 4)
+# Estados de v_relacion_atributo que cuentan como vinculo resuelto (MISMO_DOMINIO tambien tiene destino).
+ESTADOS_RESUELTOS = ("RESUELTO", "DESTINO_INACTIVO", "MISMO_DOMINIO")
+
+
+def _sin_tildes(texto: str | None) -> str:
+    base = unicodedata.normalize("NFD", texto or "")
+    return "".join(c for c in base if unicodedata.category(c) != "Mn").strip().lower()
+
+
+def es_critico(criticidad: str | None) -> bool:
+    """'Crítico' de cat_criticidad (sin importar tildes ni mayusculas); 'No crítico' no lo es."""
+    return _sin_tildes(criticidad) == "critico"
+
+
+def categoria_penalizacion(atributo: dict) -> str | None:
+    """None si el atributo tiene al menos una fuente oficial activa; si no, la clave de PENALIZACION."""
+    if atributo.get("fuentes_oficiales"):
+        return None
+    if es_critico(atributo.get("criticidad")):
+        return "critico_estructura" if atributo.get("estructura") == "Sí" else "critico"
+    return "otro"
+
+
+def calcular_indicadores(dominio: dict, vinculos: dict | None) -> dict:
+    """Indicadores de un dominio del modelo (atributos ya con sus fuentes). Pura, testeable.
+
+    `vinculos`: {"resueltos": n, "pendientes": n} del dominio, o None si no hay modelo de relaciones.
+    """
+    atributos = dominio["atributos"]
+    criticos = [a for a in atributos if es_critico(a.get("criticidad"))]
+    no_criticos = [a for a in atributos if not es_critico(a.get("criticidad"))]
+    detalle = {k: {"n": 0, "puntos": 0} for k in PENALIZACION}
+    sin_fuente = []
+    for a in atributos:
+        cat = categoria_penalizacion(a)
+        if cat is None:
+            continue
+        detalle[cat]["n"] += 1
+        detalle[cat]["puntos"] += PENALIZACION[cat]
+        sin_fuente.append({"codigo_atributo": a["codigo_atributo"], "nombre_atributo": a.get("nombre_atributo", ""),
+                           "criticidad": a.get("criticidad", ""), "estructura": a.get("estructura", ""),
+                           "penalizacion": PENALIZACION[cat]})
+    sin_fuente.sort(key=lambda x: (-x["penalizacion"], _orden_natural(x["codigo_atributo"])))
+    penalizacion = sum(x["puntos"] for x in detalle.values())
+    con_fo = sum(1 for a in atributos if a["fuentes_oficiales"])
+
+    roles = set()
+    for r in dominio["estructura"]:
+        try:
+            roles.add(int(r.get("id_rol") or 0))
+        except ValueError:
+            pass
+    faltantes = [r for r in ROLES_REQUERIDOS if r not in roles]
+
+    return {
+        # sin atributos no hay nada que medir: el puntaje queda en None (no 100)
+        "puntaje": max(0, 100 - penalizacion) if atributos else None,
+        "penalizacion": penalizacion,
+        "detalle_penalizacion": detalle,
+        "atributos": len(atributos),
+        "criticos": len(criticos),
+        "no_criticos": len(no_criticos),
+        "criticos_con_fo": sum(1 for a in criticos if a["fuentes_oficiales"]),
+        "no_criticos_con_fo": sum(1 for a in no_criticos if a["fuentes_oficiales"]),
+        "con_fo": con_fo,
+        "pct_con_fo": round(100 * con_fo / len(atributos), 1) if atributos else None,
+        "fuentes_consumo": sum(len(a["fuentes_consumo"]) for a in atributos),
+        "atributos_con_consumo": sum(1 for a in atributos if a["fuentes_consumo"]),
+        "tiene_consumo": any(a["fuentes_consumo"] for a in atributos),
+        "roles_faltantes": faltantes,
+        "estructura_completa": not faltantes,
+        "respaldos": len(dominio["respaldos"]),
+        "terminos": sum(1 for r in dominio["investigacion"] if es_termino(r.get("clasificacion"))),
+        "vinculos_resueltos": vinculos["resueltos"] if vinculos else None,
+        "vinculos_pendientes": vinculos["pendientes"] if vinculos else None,
+        "sin_fuente": sin_fuente,
+    }
+
+
+def vinculos_por_dominio(relaciones: dict | None) -> dict[str, dict]:
+    """{codigo_dominio: {"resueltos": n, "pendientes": n}} desde el modelo de grafo_relaciones."""
+    if not relaciones:
+        return {}
+    conteo: dict[str, dict] = {}
+    filas = [x for a in relaciones.get("aristas", []) for x in a.get("atributos", [])] + relaciones.get("problemas", [])
+    for x in filas:
+        c = conteo.setdefault(x.get("dominio_origen", ""), {"resueltos": 0, "pendientes": 0})
+        c["resueltos" if x.get("estado") in ESTADOS_RESUELTOS else "pendientes"] += 1
+    return conteo
 
 
 def _orden_natural(valor: str):
@@ -144,10 +250,22 @@ def construir_modelo(datos: dict[str, list[dict]], relaciones: dict | None = Non
             "terminos": sum(1 for r in d["investigacion"] if es_termino(r.get("clasificacion"))),
         }
 
+    vinculos = vinculos_por_dominio(relaciones)
+    for d in dominios.values():
+        d["indicadores"] = calcular_indicadores(
+            d, vinculos.get(d["codigo"], {"resueltos": 0, "pendientes": 0}) if relaciones else None)
+
     lista = sorted(dominios.values(), key=lambda d: d["codigo"])
     totales = {k: sum(d["conteos"][k] for d in lista) for k in
                ("estructura", "respaldos", "atributos", "fuentes_oficiales", "fuentes_consumo", "investigacion",
                 "terminos")}
+    nombres_rol = {}
+    for r in datos.get("roles", []):
+        try:
+            nombres_rol[int(r["id"])] = a_texto(r.get("nombre_rol"))
+        except (TypeError, ValueError, KeyError):
+            pass
+    evaluados = [d["indicadores"] for d in lista if d["indicadores"]["puntaje"] is not None]
     return {
         "dominios": lista,
         "relaciones": relaciones,
@@ -156,6 +274,20 @@ def construir_modelo(datos: dict[str, list[dict]], relaciones: dict | None = Non
             "n_dominios_con_atributos": sum(1 for d in lista if d["atributos"]),
             "totales": totales,
             "huerfanos": huerfanos,
+            "indicadores": {
+                "penalizacion": PENALIZACION,
+                "roles_requeridos": [{"id": i, "nombre": nombres_rol.get(i, f"Rol {i}")} for i in ROLES_REQUERIDOS],
+                "dominios_evaluados": len(evaluados),
+                "puntaje_promedio": round(sum(i["puntaje"] for i in evaluados) / len(evaluados), 1) if evaluados else None,
+                "atributos": sum(i["atributos"] for i in evaluados),
+                "con_fo": sum(i["con_fo"] for i in evaluados),
+                "criticos": sum(i["criticos"] for i in evaluados),
+                "criticos_con_fo": sum(i["criticos_con_fo"] for i in evaluados),
+                "dominios_estructura_completa": sum(1 for d in lista if d["indicadores"]["estructura_completa"]),
+                "dominios_con_consumo": sum(1 for d in lista if d["indicadores"]["tiene_consumo"]),
+                "dominios_con_respaldos": sum(1 for d in lista if d["indicadores"]["respaldos"]),
+                "dominios_con_terminos": sum(1 for d in lista if d["indicadores"]["terminos"]),
+            },
         },
     }
 
@@ -289,6 +421,69 @@ td.largo{min-width:260px;max-width:520px;white-space:pre-wrap;word-break:break-w
 .chip.pers{background:var(--rojo-suave);color:var(--rojo);font-weight:600}
 .atributo[open]>summary{border-bottom:1px solid var(--line);background:var(--amarillo-suave)}
 .atributo .cuerpo{padding:12px 14px 14px}
+/* --- indicadores: colores de serie validados con validate_palette (2026-11-10). Son tonos del azul
+   marino y del amarillo de la marca ajustados a la banda de luminosidad de graficos: el #14245C y el
+   #FCCF33 puros fallan esa banda. Claro: OK, el amarillo pide alivio de contraste (etiquetas + tabla).
+   Oscuro: todo OK. Etiqueta dentro del segmento: blanco/marino en claro, casi negro en oscuro. --- */
+:root{--serie-1:#2B4A9E;--serie-2:#D9A300;--grid:#E6EAF1;--pista-medidor:#DCE3F3}
+@media (prefers-color-scheme: dark){
+  :root{--serie-1:#6F89DB;--serie-2:#BD8B00;--grid:#26325E;--pista-medidor:#26325E}
+  .seg-etq,.seg-etq.sobre-claro{color:#0B1230}
+  body .btn-detalle{color:var(--amarillo)}
+  body .btn-detalle:hover,body .btn-detalle[aria-expanded="true"]{color:var(--marino)}
+}
+.fila-hero{display:grid;grid-template-columns:minmax(260px,1fr) 2fr;gap:16px;align-items:stretch;margin-bottom:18px}
+.fila-hero .tarjeta{margin-bottom:0}
+.fila-hero .kpis{margin-bottom:0;align-content:stretch}
+.hero{display:flex;flex-direction:column;gap:6px}
+.hero-num{font-size:56px;font-weight:700;line-height:1;color:var(--acento)}
+.hero-sub{color:var(--muted);font-size:12.5px}
+.viz-acciones{display:flex;justify-content:flex-end;margin:-4px 0 8px}
+.barras{display:flex;flex-direction:column;gap:6px}
+.fila-barra{display:grid;grid-template-columns:minmax(120px,190px) 1fr;gap:12px;align-items:center;border-radius:6px;padding:2px 4px}
+.fila-barra.clic{cursor:pointer}
+.fila-barra.clic:hover{background:var(--amarillo-suave)}
+.etq-barra{display:flex;flex-direction:column;min-width:0;line-height:1.25}
+.etq-barra b{color:var(--acento);font-size:13px}
+.etq-barra span{color:var(--muted);font-size:11.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pista{position:relative;display:flex;align-items:center;gap:6px;min-height:22px;padding-right:48px;
+  background-image:linear-gradient(var(--grid),var(--grid));background-size:1px 100%;background-repeat:no-repeat}
+.barra{height:20px;background:var(--serie-1);border-radius:0 4px 4px 0;min-width:2px}
+.barra:hover,.barra:focus,.seg:hover,.seg:focus{filter:brightness(1.15);outline:none}
+.valor-barra{font-size:12.5px;font-weight:600;color:var(--text);white-space:nowrap;font-variant-numeric:tabular-nums}
+.valor-barra.sin-valor{font-weight:400;color:var(--muted);font-style:italic}
+.ticks{min-height:16px;background:none;padding-right:0;margin-right:48px}
+.ticks span{position:absolute;transform:translateX(-50%);font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums}
+.apilada{display:flex;gap:2px;height:20px;flex:none;min-width:2px}
+.seg{position:relative;height:20px;display:flex;align-items:center;min-width:2px;overflow:visible}
+.seg:last-child{border-radius:0 4px 4px 0}
+.seg-etq{padding-left:6px;font-size:11.5px;font-weight:700;color:#fff;white-space:nowrap;visibility:hidden}
+.seg-etq.sobre-claro{color:#14245C}
+.leyenda{display:flex;gap:16px;flex-wrap:wrap;margin-bottom:10px;font-size:12.5px;color:var(--text)}
+.leyenda > span{display:inline-flex;align-items:center;gap:6px}
+.sw-rect{display:inline-block;width:12px;height:12px;border-radius:3px}
+.titulo-multiplo{margin:0 0 8px;font-size:13px;color:var(--acento)}
+.medidores{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px 20px;margin-bottom:16px}
+.medidor{outline:none}
+.medidor-cab{display:flex;justify-content:space-between;gap:8px;font-size:12.5px;margin-bottom:5px}
+.medidor-cab b{color:var(--acento)}
+.medidor-pista{height:8px;border-radius:999px;background:var(--pista-medidor);overflow:hidden}
+.medidor-pista.grande{height:10px;margin-top:6px}
+.medidor-relleno{height:100%;background:var(--serie-1);border-radius:999px}
+.estado{display:inline-flex;align-items:center;gap:5px;border-radius:999px;padding:1px 9px 1px 6px;font-size:12px;font-weight:600;white-space:nowrap}
+.estado .icono{font-weight:800}
+.estado.ok{background:var(--verde-suave);color:var(--verde)}
+.estado.no{background:var(--rojo-suave);color:var(--rojo)}
+.matriz td{vertical-align:middle}
+.lista-cumple{display:grid;gap:8px;margin-bottom:12px}
+.item-cumple{display:grid;grid-template-columns:auto 170px 1fr;gap:10px;align-items:center}
+#tip-viz{position:fixed;z-index:50;pointer-events:none;background:var(--panel);color:var(--text);border:1px solid var(--line);
+  border-radius:8px;box-shadow:0 4px 14px rgba(20,36,92,.18);padding:7px 10px;font-size:12px;max-width:320px}
+#tip-viz .tip-fila{display:flex;gap:6px;align-items:center}
+#tip-viz .tip-fila b{font-size:13px}
+#tip-viz .tip-fila span{color:var(--muted)}
+#tip-viz .tip-clave{display:inline-block;width:12px;height:3px;border-radius:2px}
+@media (max-width: 860px){ .fila-hero{grid-template-columns:1fr} .item-cumple{grid-template-columns:auto 1fr} .item-cumple .nota{grid-column:1/-1} }
 .indice-letras{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:16px}
 .indice-letras button{min-width:32px;padding:4px 8px;border:1px solid var(--line);border-radius:6px;background:var(--panel);
   color:var(--acento);font:inherit;font-weight:700;cursor:pointer}
@@ -410,6 +605,7 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
     {id:"investigacion", titulo:"Investigación"},
     {id:"terminos", titulo:"Glosario de términos"},
     {id:"relaciones", titulo:"Relaciones entre dominios"},
+    {id:"indicadores", titulo:"Indicadores"},
   ];
   const porCodigo = new Map(DATOS.dominios.map(d => [d.codigo, d]));
   const estado = {seccion:"estructura", dominio:null, filtroDominio:"", filtroAtributo:"",
@@ -1181,13 +1377,274 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
     ];
   }
 
+  // --- seccion 7: indicadores de fuente oficial ---------------------------------------------------------
+  //     Graficos en HTML (no SVG escalado: el texto mantiene su tamano). Forma segun la variable:
+  //     puntaje 0-100 -> barras horizontales de un color, de menor a mayor; conteos con/sin fuente ->
+  //     barras apiladas (2 series, leyenda); si/no por dominio -> medidor "X de N" + matriz de estado
+  //     (icono + texto). Cada grafico tiene su vista de tabla. Colores: --serie-1 / --serie-2 (validados).
+  const IND = DATOS.resumen.indicadores;
+  const tip = el("div", {id:"tip-viz", role:"tooltip", hidden:""});
+  document.body.append(tip);
+  function mostrarTip(evento, filas){
+    tip.replaceChildren(...filas.map(([valor, etiqueta, color]) => el("div", {clase:"tip-fila"}, [
+      color ? el("span", {clase:"tip-clave", style:"background:" + color}) : null,
+      el("b", {texto:String(valor)}), el("span", {texto:etiqueta})])));
+    tip.hidden = false;
+    const r = evento.target.getBoundingClientRect();
+    const x = evento.clientX || (r.left + r.width / 2), y = evento.clientY || r.top;
+    const ancho = tip.offsetWidth, alto = tip.offsetHeight;
+    tip.style.left = Math.min(window.innerWidth - ancho - 8, Math.max(8, x + 12)) + "px";
+    tip.style.top = Math.max(8, y - alto - 12) + "px";
+  }
+  function ocultarTip(){ tip.hidden = true; }
+  function conTip(nodo, filas){
+    nodo.tabIndex = 0;
+    nodo.addEventListener("pointermove", e => mostrarTip(e, filas));
+    nodo.addEventListener("pointerleave", ocultarTip);
+    nodo.addEventListener("focus", e => mostrarTip(e, filas));
+    nodo.addEventListener("blur", ocultarTip);
+    return nodo;
+  }
+  const pct = (n, t) => t ? Math.round(100 * n / t) + " %" : "—";
+  // Etiqueta dentro de un segmento: visible solo si cabe con holgura; si no, la llevan el tooltip y la
+  // tabla. Se mide con ResizeObserver (tamano real ya calculado, y de nuevo si cambia el ancho).
+  const obsEtiquetas = new ResizeObserver(entradas => {
+    for (const en of entradas){
+      const seg = en.target, etq = seg.querySelector(".seg-etq");
+      if (etq) etq.style.visibility = etq.offsetWidth > seg.clientWidth - 8 ? "hidden" : "visible";
+    }
+  });
+
+  // Grafico + boton "Ver tabla" (la tabla es la via accesible para cada valor).
+  function conTabla(grafico, columnas, filas){
+    const tablaNodo = tabla(columnas, filas);
+    tablaNodo.hidden = true;
+    const b = el("button", {type:"button", clase:"btn-detalle btn-tabla", texto:"Ver tabla", onclick: () => {
+      const verTabla = tablaNodo.hidden;
+      tablaNodo.hidden = !verTabla; grafico.hidden = verTabla;
+      b.textContent = verTabla ? "Ver gráfico" : "Ver tabla";
+    }});
+    return el("div", {clase:"viz"}, [el("div", {clase:"viz-acciones"}, b), grafico, tablaNodo]);
+  }
+
+  // Barras horizontales de una serie: [{etiqueta, sub, valor, texto, tip, onclick}], escala 0..max.
+  function barrasH(filas, max, ticks){
+    const cont = el("div", {clase:"barras"});
+    for (const f of filas){
+      const ancho = f.valor === null ? 0 : Math.max(0, Math.min(100, 100 * f.valor / max));
+      const barra = f.valor === null ? null : conTip(el("div", {clase:"barra", style:"width:" + ancho + "%"}), f.tip);
+      cont.append(el("div", {clase:"fila-barra" + (f.onclick ? " clic" : ""), onclick: f.onclick}, [
+        el("div", {clase:"etq-barra"}, [el("b", {texto:f.etiqueta}), f.sub ? el("span", {texto:f.sub}) : null]),
+        el("div", {clase:"pista"}, [barra, el("span", {clase: "valor-barra" + (f.valor === null ? " sin-valor" : ""), texto:f.texto})]),
+      ]));
+    }
+    if (ticks) cont.append(el("div", {clase:"fila-barra eje"}, [el("div"), el("div", {clase:"pista ticks"},
+      ticks.map(t => el("span", {style:"left:" + (100 * t / max) + "%", texto:String(t)})))]));
+    return cont;
+  }
+
+  // Barras apiladas: series [{nombre, color}], filas [{etiqueta, sub, partes:[n por serie], onclick}].
+  function barrasApiladas(series, filas, max){
+    const leyenda = el("div", {clase:"leyenda"}, series.map(s =>
+      el("span", null, [el("span", {clase:"sw-rect", style:"background:" + s.color}), s.nombre])));
+    const cont = el("div", {clase:"barras"});
+    for (const f of filas){
+      const total = f.partes.reduce((a, b) => a + b, 0);
+      const segs = f.partes.map((n, i) => {
+        if (!n) return null;
+        // ancho del segmento proporcional a su valor dentro de la barra (flex-grow = valor)
+        const seg = conTip(el("div", {clase:"seg", style:"flex:" + n + " 1 0;background:" + series[i].color}),
+          [[n + " de " + total, series[i].nombre, series[i].color], [pct(n, total), "del total de la fila"]]);
+        seg.append(el("span", {clase:"seg-etq" + (series[i].claro ? " sobre-claro" : ""), texto:String(n)}));
+        obsEtiquetas.observe(seg);   // la etiqueta se muestra solo si cabe (ver obsEtiquetas)
+        return seg;
+      }).filter(Boolean);
+      cont.append(el("div", {clase:"fila-barra" + (f.onclick ? " clic" : ""), onclick: f.onclick}, [
+        el("div", {clase:"etq-barra"}, [el("b", {texto:f.etiqueta}), f.sub ? el("span", {texto:f.sub}) : null]),
+        el("div", {clase:"pista"}, [total ? el("div", {clase:"apilada", style:"width:" + (100 * total / max) + "%"}, segs) : null,
+          el("span", {clase:"valor-barra", texto:String(total)})]),
+      ]));
+    }
+    return el("div", null, [leyenda, cont]);
+  }
+
+  // Medidor: una proporcion contra su limite ("4 de 6 dominios").
+  function medidor(etiqueta, n, total, detalle){
+    return conTip(el("div", {clase:"medidor"}, [
+      el("div", {clase:"medidor-cab"}, [el("span", {texto:etiqueta}), el("b", {texto: n + " de " + total})]),
+      el("div", {clase:"medidor-pista"}, el("div", {clase:"medidor-relleno", style:"width:" + (total ? 100 * n / total : 0) + "%"})),
+    ]), [[n + " de " + total, detalle || etiqueta], [pct(n, total), ""]]);
+  }
+
+  // Estado si/no con icono + texto (nunca solo color).
+  function chipCumple(ok, texto, titulo){
+    return el("span", {clase:"estado " + (ok ? "ok" : "no"), title: titulo || ""}, [
+      el("span", {clase:"icono", "aria-hidden":"true", texto: ok ? "✓" : "✕"}), texto]);
+  }
+  const nombreRol = id => (IND.roles_requeridos.find(r => r.id === id) || {nombre:"Rol " + id}).nombre;
+  const SERIES_FO = [{nombre:"Con fuente oficial", color:"var(--serie-1)"}, {nombre:"Sin fuente oficial", color:"var(--serie-2)", claro:true}];
+  const SERIES_VINC = [{nombre:"Vínculo resuelto", color:"var(--serie-1)"}, {nombre:"Vínculo pendiente", color:"var(--serie-2)", claro:true}];
+  const reglaTexto = "Parte de 100. Cada atributo activo sin fuente oficial activa resta: " +
+    IND.penalizacion.critico_estructura + " si es crítico y está marcado en Estructura, " +
+    IND.penalizacion.critico + " si solo es crítico y " + IND.penalizacion.otro + " en cualquier otro caso. Mínimo 0.";
+  const verDominio = codigo => () => { estado.dominio = codigo; actualizar(); };
+
+  function vistaIndicadores(d){
+    return d ? indicadoresDominio(d) : indicadoresGenerales();
+  }
+
+  function indicadoresGenerales(){
+    const doms = DATOS.dominios, evaluados = doms.filter(x => x.indicadores.puntaje !== null);
+    const cab = el("div", {clase:"cabecera"}, [el("div", null, [
+      el("h2", {texto:"Indicadores de fuente oficial"}), el("div", {clase:"sub", texto: reglaTexto})])]);
+
+    const hero = el("section", {clase:"tarjeta"}, [el("h3", {texto:"Puntaje promedio de fuente oficial"}), el("div", {clase:"tc hero"}, [
+      el("div", {clase:"hero-num", texto: IND.puntaje_promedio === null ? "—" : String(IND.puntaje_promedio)}),
+      el("div", {clase:"hero-sub", texto:"de 100 · promedio de " + IND.dominios_evaluados + " dominio(s) con atributos activos"}),
+    ])]);
+    const kpis = el("div", {clase:"kpis"}, [
+      ["Atributos con fuente oficial", IND.con_fo + " de " + IND.atributos, pct(IND.con_fo, IND.atributos)],
+      ["Críticos con fuente oficial", IND.criticos_con_fo + " de " + IND.criticos, pct(IND.criticos_con_fo, IND.criticos)],
+      ["No críticos con fuente oficial", (IND.con_fo - IND.criticos_con_fo) + " de " + (IND.atributos - IND.criticos),
+        pct(IND.con_fo - IND.criticos_con_fo, IND.atributos - IND.criticos)],
+    ].map(([e, n, p]) => el("div", {clase:"kpi"}, [el("b", {texto:n}), el("span", {texto: e + " · " + p})])));
+
+    const filasPuntaje = evaluados.slice().sort((a, b) => a.indicadores.puntaje - b.indicadores.puntaje || a.codigo.localeCompare(b.codigo))
+      .concat(doms.filter(x => x.indicadores.puntaje === null)).map(x => {
+        const i = x.indicadores;
+        return {etiqueta:x.codigo, sub:x.nombre, valor:i.puntaje, onclick: verDominio(x.codigo),
+          texto: i.puntaje === null ? "sin atributos" : String(i.puntaje),
+          tip: [[i.puntaje + " de 100", x.codigo + " · " + x.nombre], ["−" + i.penalizacion, "puntos por atributos sin fuente"],
+                [i.con_fo + " de " + i.atributos, "atributos con fuente oficial"]]};
+      });
+    const tarjetaPuntaje = tarjeta("Puntaje de fuente oficial por dominio (de menor a mayor)", null, conTabla(
+      barrasH(filasPuntaje, 100, [0, 25, 50, 75, 100]),
+      [["codigo","Dominio"], ["nombre","Nombre"], ["puntaje","Puntaje"], ["penalizacion","Puntos restados"], ["cobertura","Con fuente oficial"]],
+      filasPuntaje.map(f => { const x = porCodigo.get(f.etiqueta), i = x.indicadores;
+        return {codigo:x.codigo, nombre:x.nombre, puntaje: i.puntaje === null ? "sin atributos" : String(i.puntaje),
+                penalizacion: String(i.penalizacion), cobertura: i.con_fo + " de " + i.atributos}; })));
+
+    // conteos con/sin fuente por criticidad: dos graficos con la MISMA escala (multiplos pequenos)
+    const maxCrit = Math.max(1, ...evaluados.map(x => Math.max(x.indicadores.criticos, x.indicadores.no_criticos)));
+    const filasCrit = campo => evaluados.map(x => { const i = x.indicadores, tot = i[campo], con = i[campo + "_con_fo"];
+      return {etiqueta:x.codigo, sub:x.nombre, partes:[con, tot - con], onclick: verDominio(x.codigo)}; });
+    const tablaCrit = evaluados.map(x => { const i = x.indicadores; return {codigo:x.codigo,
+      criticos:String(i.criticos), criticos_con:String(i.criticos_con_fo), no_criticos:String(i.no_criticos),
+      no_criticos_con:String(i.no_criticos_con_fo), total:String(i.atributos), con:String(i.con_fo)}; });
+    const tarjetaCrit = tarjeta("Atributos con y sin fuente oficial, por criticidad", null, conTabla(
+      el("div", {clase:"dos-columnas"}, [
+        el("div", null, [el("h4", {clase:"titulo-multiplo", texto:"Críticos"}), barrasApiladas(SERIES_FO, filasCrit("criticos"), maxCrit)]),
+        el("div", null, [el("h4", {clase:"titulo-multiplo", texto:"No críticos"}), barrasApiladas(SERIES_FO, filasCrit("no_criticos"), maxCrit)]),
+      ]),
+      [["codigo","Dominio"], ["total","Atributos"], ["con","Con fuente oficial"], ["criticos","Críticos"],
+       ["criticos_con","Críticos con fuente"], ["no_criticos","No críticos"], ["no_criticos_con","No críticos con fuente"]], tablaCrit));
+
+    const n = doms.length;
+    const tarjetaCumple = tarjeta("Cumplimiento por dominio", null, [
+      el("div", {clase:"medidores"}, [
+        medidor("Estructura completa (roles " + IND.roles_requeridos.map(r => r.id).join(", ") + ")", IND.dominios_estructura_completa, n,
+          "dominios con " + IND.roles_requeridos.map(r => r.nombre).join(", ")),
+        medidor("Con fuentes de consumo", IND.dominios_con_consumo, n),
+        medidor("Con respaldos", IND.dominios_con_respaldos, n),
+        medidor("Con términos en el glosario", IND.dominios_con_terminos, n),
+      ]),
+      el("div", {clase:"tabla-wrap"}, el("table", {clase:"matriz"}, [
+        el("thead", null, el("tr", null, ["Dominio","Puntaje","Estructura completa","Fuentes de consumo","Respaldos","Glosario","Vínculos"]
+          .map(c => el("th", {texto:c})))),
+        el("tbody", null, doms.map(x => { const i = x.indicadores;
+          return el("tr", {clase:"clic", onclick: verDominio(x.codigo), title:"Ver indicadores de " + x.codigo}, [
+            el("td", null, [el("b", {texto:x.codigo}), " ", el("span", {clase:"nota", texto:x.nombre})]),
+            el("td", {texto: i.puntaje === null ? "—" : String(i.puntaje)}),
+            el("td", null, chipCumple(i.estructura_completa, i.estructura_completa ? "Completa" :
+              "Falta " + i.roles_faltantes.length, i.roles_faltantes.map(nombreRol).join(", "))),
+            el("td", null, chipCumple(i.tiene_consumo, i.tiene_consumo ? i.fuentes_consumo + " fuentes" : "No")),
+            el("td", null, chipCumple(i.respaldos > 0, i.respaldos ? String(i.respaldos) : "No")),
+            el("td", null, chipCumple(i.terminos > 0, i.terminos ? i.terminos + " términos" : "No")),
+            el("td", {texto: i.vinculos_resueltos === null ? "—" : i.vinculos_resueltos + " de " + (i.vinculos_resueltos + i.vinculos_pendientes)}),
+          ]); })),
+      ])),
+    ]);
+
+    const conVinc = doms.filter(x => x.indicadores.vinculos_resueltos !== null && (x.indicadores.vinculos_resueltos + x.indicadores.vinculos_pendientes));
+    const tarjetaVinc = REL ? tarjeta("Vínculos Compartido / Similar por dominio", null, conVinc.length ? conTabla(
+      barrasApiladas(SERIES_VINC, conVinc.map(x => ({etiqueta:x.codigo, sub:x.nombre, onclick: verDominio(x.codigo),
+        partes:[x.indicadores.vinculos_resueltos, x.indicadores.vinculos_pendientes]})),
+        Math.max(1, ...conVinc.map(x => x.indicadores.vinculos_resueltos + x.indicadores.vinculos_pendientes))),
+      [["codigo","Dominio"], ["res","Resueltos"], ["pen","Pendientes"]],
+      conVinc.map(x => ({codigo:x.codigo, res:String(x.indicadores.vinculos_resueltos), pen:String(x.indicadores.vinculos_pendientes)})))
+      : el("div", {clase:"vacio", texto:"Ningún atributo declara Compartido / Similar."})) : null;
+
+    return [cab, el("div", {clase:"fila-hero"}, [hero, kpis]), tarjetaPuntaje, tarjetaCrit, tarjetaCumple, tarjetaVinc];
+  }
+
+  function indicadoresDominio(d){
+    const i = d.indicadores, P = IND.penalizacion;
+    if (i.puntaje === null) return [cabeceraDominio(d), el("div", {clase:"avisos aviso-red",
+      texto:"Este dominio no tiene atributos activos: no hay puntaje de fuente oficial."}), cumplimientoDominio(d)];
+    const hero = el("section", {clase:"tarjeta"}, [el("h3", {texto:"Puntaje de fuente oficial"}), el("div", {clase:"tc hero"}, [
+      el("div", {clase:"hero-num", texto:String(i.puntaje)}),
+      el("div", {clase:"hero-sub", texto:"de 100 · " + reglaTexto}),
+      el("div", {clase:"medidor-pista grande"}, el("div", {clase:"medidor-relleno", style:"width:" + i.puntaje + "%"})),
+    ])]);
+    const detalle = el("div", {clase:"kpis"}, [
+      ["Críticos con estructura sin fuente", i.detalle_penalizacion.critico_estructura, P.critico_estructura],
+      ["Críticos sin fuente", i.detalle_penalizacion.critico, P.critico],
+      ["Otros sin fuente", i.detalle_penalizacion.otro, P.otro],
+    ].map(([e, x, p]) => el("div", {clase:"kpi"}, [el("b", {texto: x.puntos ? "−" + x.puntos : "0"}),
+      el("span", {texto: e + ": " + x.n + " × " + p})])));
+
+    const filas = [
+      {etiqueta:"Críticos", partes:[i.criticos_con_fo, i.criticos - i.criticos_con_fo]},
+      {etiqueta:"No críticos", partes:[i.no_criticos_con_fo, i.no_criticos - i.no_criticos_con_fo]},
+    ];
+    const tarjetaCrit = tarjeta("Atributos con y sin fuente oficial", i.atributos, conTabla(
+      barrasApiladas(SERIES_FO, filas, Math.max(1, i.criticos, i.no_criticos)),
+      [["etiqueta","Criticidad"], ["total","Atributos"], ["con","Con fuente oficial"], ["sin","Sin fuente oficial"]],
+      filas.map(f => ({etiqueta:f.etiqueta, total:String(f.partes[0] + f.partes[1]), con:String(f.partes[0]), sin:String(f.partes[1])}))));
+
+    const tarjetaSin = tarjeta("Atributos sin fuente oficial", i.sin_fuente.length, i.sin_fuente.length
+      ? el("div", {clase:"tabla-wrap"}, el("table", null, [
+          el("thead", null, el("tr", null, ["Atributo","Nombre","Criticidad","Estructura","Resta"].map(c => el("th", {texto:c})))),
+          el("tbody", null, i.sin_fuente.map(x => el("tr", {clase:"clic", title:"Ver el atributo",
+            onclick: () => { estado.seccion = "atributos"; estado.filtroAtributo = x.nombre_atributo; actualizar(); }}, [
+            el("td", {texto: d.codigo + "-" + x.codigo_atributo}), el("td", {texto:x.nombre_atributo}),
+            el("td", {texto:v(x.criticidad)}), el("td", {texto:v(x.estructura)}), el("td", {texto:"−" + x.penalizacion}),
+          ])))]))
+      : el("div", {clase:"vacio", texto:"Todos los atributos activos tienen fuente oficial."}));
+
+    return [cabeceraDominio(d), el("div", {clase:"fila-hero"}, [hero, detalle]), tarjetaCrit, cumplimientoDominio(d), tarjetaSin];
+  }
+
+  function cumplimientoDominio(d){
+    const i = d.indicadores;
+    const filas = [
+      ["Estructura completa", i.estructura_completa, i.estructura_completa
+        ? "Tiene los roles " + IND.roles_requeridos.map(r => r.nombre).join(", ") + "."
+        : "Falta: " + i.roles_faltantes.map(nombreRol).join(", ") + "."],
+      ["Fuentes de consumo", i.tiene_consumo, i.tiene_consumo
+        ? i.fuentes_consumo + " fuente(s) en " + i.atributos_con_consumo + " atributo(s)." : "Ningún atributo tiene fuente de consumo."],
+      ["Respaldos", i.respaldos > 0, i.respaldos ? i.respaldos + " respaldo(s) registrados." : "Sin respaldos."],
+      ["Glosario", i.terminos > 0, i.terminos ? i.terminos + " término(s)." : "Sin términos."],
+    ];
+    const vinc = i.vinculos_resueltos === null ? null : i.vinculos_resueltos + i.vinculos_pendientes;
+    return tarjeta("Cumplimiento del dominio", null, [
+      el("div", {clase:"lista-cumple"}, filas.map(([e, ok, txt]) => el("div", {clase:"item-cumple"}, [
+        chipCumple(ok, ok ? "Sí" : "No"), el("b", {texto:e}), el("span", {clase:"nota", texto:txt})]))),
+      vinc ? el("div", null, [el("h4", {clase:"titulo-multiplo", texto:"Vínculos Compartido / Similar"}),
+        barrasApiladas(SERIES_VINC, [{etiqueta:d.codigo, partes:[i.vinculos_resueltos, i.vinculos_pendientes]}], vinc)]) : null,
+    ]);
+  }
+
   function pintarContenido(){
     const main = document.getElementById("contenido");
     const d = estado.dominio ? porCodigo.get(estado.dominio) : null;
     if (redActual){ redActual.destroy(); redActual = null; }
     despuesDePintar.length = 0;
     let nodos;
+    ocultarTip();
+    obsEtiquetas.disconnect();
     if (estado.seccion === "relaciones") nodos = vistaRelaciones(d);
+    else if (estado.seccion === "indicadores") nodos = vistaIndicadores(d);
     else if (estado.seccion === "terminos") nodos = vistaTerminos(d);
     else if (!d) nodos = vistaResumen();
     else if (estado.seccion === "atributos") nodos = vistaAtributos(d);

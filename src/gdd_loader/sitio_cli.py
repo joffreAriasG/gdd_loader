@@ -8,6 +8,7 @@ Secciones del menu lateral, por dominio:
   3. Investigacion (sin los terminos)
   4. Glosario de terminos (clasificacion "Término" de Investigacion, todos los dominios)
   5. Relaciones entre dominios (grafo de atributos Compartido / Similar)
+  6. Indicadores (puntaje de fuente oficial y cumplimiento por dominio)
 
 Uso:
 
