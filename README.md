@@ -255,3 +255,19 @@ verificar que se llama TRUNCATE + INSERT en el orden correcto.
   como espejo simple del Excel por dominio.
 - Migrar la autenticación a SQL Server de usuario personal a una
   cuenta de servicio antes de pasar a producción.
+
+## Grafo de relaciones entre dominios (v0.9.0)
+
+Grafo HTML autocontenido (sin internet ni servidor) de los atributos declarados como
+Compartido / Similar en `gdd.atributo`. **Solo lectura**: no escribe en la base ni usa staging.
+
+1. Una sola vez, en DGODELIVERY: `db/migraciones/20261105_vistas_relacion_dominio.sql`
+   (crea `gdd.v_relacion_atributo` y `gdd.v_relacion_dominio`; no toca tablas).
+2. `python -m gdd_loader.grafo_cli --salida "C:\ruta\carpeta"` genera
+   `grafo_relaciones_AAAAMMDD_HHMM.html`.
+
+Flecha: el dominio de origen **usa** atributos del dominio destino (dominio primario, dueño).
+Solo se dibujan los vínculos `RESUELTO` y `DESTINO_INACTIVO`; el resto (`SIN_VINCULO`,
+`VINCULO_ROTO`, `INCONSISTENTE`, `MISMO_DOMINIO`, `SIN_TIPO`) aparece en la pestaña
+"Calidad de vínculos". `gdd.v_relacion_dominio` sirve también como fuente para Power BI.
+vis-network 9.1.9 va incrustado (`exportar/recursos`, licencia MIT).

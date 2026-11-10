@@ -34,3 +34,6 @@ Claude outputs/
 .idea/
 Thumbs.db
 desktop.ini
+
+# --- Contexto local de Claude Code (repo publico: no versionar) ---
+CLAUDE.md

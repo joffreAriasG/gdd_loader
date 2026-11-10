@@ -21,5 +21,8 @@ dev = ["pytest>=7.4"]
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"gdd_loader.exportar" = ["recursos/*.js", "recursos/*-LICENSE-MIT"]
+
 [tool.setuptools.dynamic]
 version = {attr = "gdd_loader.__version__"}
