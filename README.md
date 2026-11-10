@@ -271,3 +271,24 @@ Solo se dibujan los vínculos `RESUELTO` y `DESTINO_INACTIVO`; el resto (`SIN_VI
 `VINCULO_ROTO`, `INCONSISTENTE`, `MISMO_DOMINIO`, `SIN_TIPO`) aparece en la pestaña
 "Calidad de vínculos". `gdd.v_relacion_dominio` sirve también como fuente para Power BI.
 vis-network 9.1.9 va incrustado (`exportar/recursos`, licencia MIT).
+
+## Sitio de consulta por dominio (v0.10.0)
+
+HTML autocontenido (sin internet ni servidor) con menú lateral y cinco secciones por dominio.
+**Solo lectura**: lee `gdd.*` (registros activos); no usa staging.
+
+1. **Dominio y estructura**: datos del dominio, responsables (hoja Estructura) y respaldos.
+2. **Atributos y fuentes**: cada atributo con sus fuentes oficiales (fórmula y valores válidos en fila
+   desplegable) y sus fuentes de consumo. Botón **Descargar Excel**: `.xlsx` con los atributos visibles
+   según el filtro y hojas de fuentes oficiales, fuentes de consumo y relaciones (se genera en el navegador).
+3. **Investigación**: registros de la hoja Investigación, agrupados por clasificación (sin los términos).
+4. **Glosario de términos**: los registros con clasificación "Término" de todos los dominios en una sola
+   página (o los del dominio elegido), con buscador e índice A–Z.
+5. **Relaciones entre dominios**: grafo de los atributos Compartido / Similar (completo, o el dominio
+   elegido con sus vecinos), con la calidad de vínculos. Usa la vista `gdd.v_relacion_atributo`
+   (migración `20261105_vistas_relacion_dominio.sql`); si no existe, el sitio se genera igual y la
+   sección lo informa.
+
+`python -m gdd_loader.sitio_cli --salida "C:\ruta\carpeta"` genera `sitio_dominios_AAAAMMDD_HHMM.html`.
+El archivo contiene valores reales, incluidos los nombres de los responsables: compartirlo solo con
+el equipo de gobierno de datos.
