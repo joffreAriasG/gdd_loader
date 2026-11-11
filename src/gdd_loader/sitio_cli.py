@@ -5,10 +5,11 @@ Genera el sitio de consulta por dominio como un archivo HTML autocontenido
 Secciones del menu lateral, por dominio:
   1. Dominio y estructura (datos del dominio, responsables y respaldos)
   2. Atributos y fuentes (fuentes oficiales y de consumo de cada atributo)
-  3. Investigacion (sin los terminos)
-  4. Glosario de terminos (clasificacion "Término" de Investigacion, todos los dominios)
-  5. Relaciones entre dominios (grafo de atributos Compartido / Similar)
-  6. Indicadores (puntaje de fuente oficial y cumplimiento por dominio)
+  3. Explorador de atributos (filtros combinables, columnas y descarga a Excel)
+  4. Investigacion (sin los terminos)
+  5. Glosario de terminos (clasificacion "Término" de Investigacion, todos los dominios)
+  6. Relaciones entre dominios (grafo de atributos Compartido / Similar)
+  7. Indicadores (puntaje de fuente oficial y cumplimiento por dominio)
 
 Uso:
 
@@ -16,9 +17,9 @@ Uso:
     python -m gdd_loader.sitio_cli --salida "C:\\ruta\\carpeta"
     python -m gdd_loader.sitio_cli --salida sitio.html --titulo "Glosario PRODUCCION"
 
-Fuente: tablas gdd.* (solo registros activos) y, para la seccion 4, la vista
+Fuente: tablas gdd.* (solo registros activos) y, para la seccion 6, la vista
 gdd.v_relacion_atributo (migracion 20261105_vistas_relacion_dominio.sql). Si la
-vista no existe, el sitio se genera igual y la seccion 4 lo informa. No usa staging.
+vista no existe, el sitio se genera igual y la seccion 6 lo informa. No usa staging.
 El HTML contiene valores reales (incluidos nombres de responsables): entregarlo
 solo al equipo de gobierno de datos.
 
@@ -58,7 +59,7 @@ def resolver_ruta_salida(salida: str, ahora: datetime.datetime) -> Path:
 
 
 def leer_relaciones_o_none(conn, logger) -> dict | None:
-    """Modelo del grafo (seccion 4) o None si falta la vista gdd.v_relacion_atributo."""
+    """Modelo del grafo (seccion 6) o None si falta la vista gdd.v_relacion_atributo."""
     try:
         return construir_modelo_grafo(leer_dominios(conn), leer_relaciones(conn))
     except VistaNoExisteError as exc:

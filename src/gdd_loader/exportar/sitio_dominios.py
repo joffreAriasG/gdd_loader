@@ -7,6 +7,9 @@ servidor) con menu lateral y tres secciones por dominio:
   2. Atributos y fuentes       -> atributos con sus fuentes oficiales y sus
                                   fuentes de consumo (MetadataTecnica /
                                   MetadataRepositorio).
+  2b. Explorador de atributos (v0.12.0) -> todos los dominios, filtros combinables,
+                                  busqueda de texto, selector de columnas y descarga a
+                                  Excel del resultado (se muestra como seccion 3).
   3. Investigacion             -> normas, procesos, proyectos, modelos y demas
                                   registros de la hoja Investigacion (sin los
                                   terminos).
@@ -484,6 +487,47 @@ td.largo{min-width:260px;max-width:520px;white-space:pre-wrap;word-break:break-w
 #tip-viz .tip-fila span{color:var(--muted)}
 #tip-viz .tip-clave{display:inline-block;width:12px;height:3px;border-radius:2px}
 @media (max-width: 860px){ .fila-hero{grid-template-columns:1fr} .item-cumple{grid-template-columns:auto 1fr} .item-cumple .nota{grid-column:1/-1} }
+/* --- explorador de atributos --- */
+.exp-barra{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin-bottom:14px;
+  display:flex;flex-direction:column;gap:10px;box-shadow:0 1px 2px rgba(20,36,92,.06)}
+.exp-fila{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.exp-texto{flex:1;min-width:260px;padding:9px 12px;border:1px solid var(--line);border-radius:8px;background:var(--panel);
+  color:var(--text);font:inherit}
+.exp-texto:focus{outline:2px solid var(--amarillo-fuerte);outline-offset:0}
+.btn-excel-exp{background:var(--amarillo);color:var(--marino);border:1px solid var(--amarillo-fuerte);border-radius:8px;
+  padding:9px 16px;font:inherit;font-weight:700;cursor:pointer}
+.btn-excel-exp:hover{background:var(--amarillo-fuerte)}
+details.filtro{position:relative}
+details.filtro > summary{list-style:none;cursor:pointer;display:inline-flex;align-items:center;gap:6px;padding:6px 12px;
+  border:1px solid var(--line);border-radius:999px;background:var(--panel);color:var(--text);font-size:13px;user-select:none}
+details.filtro > summary::-webkit-details-marker{display:none}
+details.filtro > summary::after{content:"▾";color:var(--muted);font-size:11px}
+details.filtro[open] > summary,details.filtro > summary:hover{border-color:var(--amarillo-fuerte);background:var(--amarillo-suave)}
+details.filtro > summary .cuenta{background:var(--marino);color:#fff}
+details.filtro-columnas > summary{background:var(--marino);color:#fff;border-color:var(--marino)}
+details.filtro-columnas > summary::after{color:#fff}
+details.filtro-columnas[open] > summary,details.filtro-columnas > summary:hover{background:var(--marino-3);border-color:var(--marino-3)}
+.filtro-panel{position:absolute;z-index:30;top:calc(100% + 6px);left:0;min-width:260px;max-width:380px;background:var(--panel);
+  border:1px solid var(--line);border-radius:10px;box-shadow:0 8px 24px rgba(20,36,92,.18);padding:10px}
+.filtro-buscar{width:100%;padding:6px 9px;border:1px solid var(--line);border-radius:6px;font:inherit;margin-bottom:8px;
+  background:var(--panel);color:var(--text)}
+.filtro-botones{display:flex;gap:6px;margin-bottom:6px}
+.filtro-botones button{background:none;border:1px solid var(--line);border-radius:6px;padding:2px 9px;font:inherit;font-size:12px;
+  color:var(--acento);cursor:pointer}
+.filtro-lista{max-height:280px;overflow:auto;display:flex;flex-direction:column;gap:2px}
+.opcion-filtro{display:grid;grid-template-columns:auto 1fr auto;gap:8px;align-items:center;padding:4px 6px;border-radius:6px;
+  cursor:pointer;font-size:13px}
+.opcion-filtro:hover{background:var(--amarillo-suave)}
+.opcion-filtro input{accent-color:var(--marino)}
+.exp-nav{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:8px}
+.exp-paginas{display:inline-flex;gap:8px;align-items:center;font-size:13px}
+.exp-paginas button{background:var(--marino);color:#fff;border:0;border-radius:6px;padding:5px 10px;font:inherit;font-size:12.5px;cursor:pointer}
+.exp-paginas button:disabled{opacity:.4;cursor:default}
+.exp-tabla{max-height:68vh}
+th.ordenable{cursor:pointer;user-select:none}
+th.ordenable:hover{background:var(--marino-3)}
+.enlace-atributo{background:none;border:0;padding:0;font:inherit;font-weight:700;color:var(--acento);cursor:pointer;
+  text-decoration:underline;text-underline-offset:2px}
 .indice-letras{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:16px}
 .indice-letras button{min-width:32px;padding:4px 8px;border:1px solid var(--line);border-radius:6px;background:var(--panel);
   color:var(--acento);font:inherit;font-weight:700;cursor:pointer}
@@ -602,6 +646,7 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
   const SECCIONES = [
     {id:"estructura", titulo:"Dominio y estructura"},
     {id:"atributos", titulo:"Atributos y fuentes"},
+    {id:"explorador", titulo:"Explorador de atributos"},
     {id:"investigacion", titulo:"Investigación"},
     {id:"terminos", titulo:"Glosario de términos"},
     {id:"relaciones", titulo:"Relaciones entre dominios"},
@@ -1635,6 +1680,254 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
     ]);
   }
 
+  // --- seccion 3: explorador de atributos (todos los dominios, filtros combinables) ------------------------
+  //     Filtros de seleccion multiple + busqueda de texto (todas las palabras, sin tildes) sobre atributo,
+  //     descripcion, primario y fuentes (servidor, base, tabla, campo, formula, valores validos, clase).
+  //     Solo se repinta el resultado al filtrar (la barra de filtros conserva foco y desplegables abiertos).
+  const COLS_EXP = [   // [clave, encabezado, ancho en Excel, texto largo, visible por defecto]
+    ["dominio","Dominio",10,0,1], ["nombre_dominio","Nombre del dominio",28,0,0], ["codigo","Código",12,0,1],
+    ["nombre_atributo","Atributo",30,0,1], ["descripcion_atributo","Descripción",60,1,0], ["criticidad","Criticidad",12,0,1],
+    ["tipo_atributo","Tipo de atributo",16,0,0], ["compartido_similar","Compartido / similar",14,0,1],
+    ["atributo_primario","Atributo primario",28,0,0], ["dominio_primario","Dominio primario",28,0,0],
+    ["estado_vinculo","Estado del vínculo",16,0,0], ["es_dato_personal","Dato personal",10,0,0],
+    ["clasificacion_dato_personal","Clasificación dato personal",22,0,0], ["reporte","Reporte",9,0,0], ["proyecto","Proyecto",9,0,0],
+    ["proceso","Proceso",9,0,0], ["estructura","Estructura",10,0,0], ["fecha_aprobacion","Fecha de aprobación",13,0,0],
+    ["version","Versión",8,0,0], ["tiene_fo","Con fuente oficial",11,0,1], ["n_oficiales","N.º fuentes oficiales",10,0,1],
+    ["fuente_primaria","Fuente primaria",50,1,0], ["fuentes_oficiales","Fuentes oficiales",60,1,0],
+    ["tiene_consumo","Con fuente de consumo",11,0,0], ["n_consumo","N.º fuentes de consumo",10,0,1],
+    ["fuentes_consumo","Fuentes de consumo",60,1,0], ["resta","Resta al puntaje",9,0,0],
+  ];
+  const NUMERICAS_EXP = new Set(["n_oficiales", "n_consumo", "resta"]);
+  const CLAVE_COLS = "gdd_sitio_explorador_columnas";
+  const EXP = {sel:{}, texto:"", orden:{campo:"codigo", asc:true}, pagina:0, porPagina:100, columnas:null};
+  let FILAS_EXP = null;
+
+  function restaAtributo(a){
+    if (a.fuentes_oficiales.length) return 0;
+    const critico = sinTildes(a.criticidad).trim().toLowerCase() === "critico";
+    return critico ? (a.estructura === "Sí" ? IND.penalizacion.critico_estructura : IND.penalizacion.critico) : IND.penalizacion.otro;
+  }
+  function construirFilasExp(){
+    const estadoVinc = new Map();
+    if (REL) for (const x of REL.aristas.flatMap(a => a.atributos).concat(REL.problemas)) estadoVinc.set(x.codigo_origen, x.estado);
+    const ruta = f => [f.servidor, f.base_datos, f.tabla, f.nombre_campo].filter(Boolean).join(" / ");
+    return DATOS.dominios.flatMap(d => d.atributos.map(a => {
+      const fo = a.fuentes_oficiales, fc = a.fuentes_consumo, codigo = d.codigo + "-" + a.codigo_atributo;
+      const prim = fo.find(f => f.es_fuente_primaria === "Sí") || fo[0];
+      const fila = {
+        dominio:d.codigo, nombre_dominio:d.nombre, codigo, codigo_atributo:a.codigo_atributo, nombre_atributo:a.nombre_atributo,
+        descripcion_atributo:a.descripcion_atributo, criticidad:a.criticidad, tipo_atributo:a.tipo_atributo,
+        compartido_similar:a.compartido_similar, atributo_primario:a.atributo_primario, dominio_primario:a.dominio_primario,
+        estado_vinculo: estadoVinc.get(codigo) || "", es_dato_personal:a.es_dato_personal,
+        clasificacion_dato_personal:a.clasificacion_dato_personal, reporte:a.reporte, proyecto:a.proyecto, proceso:a.proceso,
+        estructura:a.estructura, fecha_aprobacion:a.fecha_aprobacion, version:a.version,
+        tiene_fo: fo.length ? "Sí" : "No", n_oficiales: fo.length, fuente_primaria: prim ? ruta(prim) : "",
+        fuentes_oficiales: fo.map(ruta).join(" | "), tiene_consumo: fc.length ? "Sí" : "No", n_consumo: fc.length,
+        fuentes_consumo: fc.map(f => (f.clase ? f.clase + ": " : "") + ruta(f)).join(" | "), resta: restaAtributo(a), _a:a, _d:d,
+      };
+      fila._buscar = sinTildes([codigo, a.nombre_atributo, a.descripcion_atributo, a.atributo_primario, a.dominio_primario,
+        a.tipo_atributo, a.clasificacion_dato_personal,
+        ...fo.flatMap(f => [f.servidor, f.base_datos, f.tabla, f.nombre_campo, f.formula_calculo, f.lista_valores_validos]),
+        ...fc.flatMap(f => [f.servidor, f.base_datos, f.tabla, f.nombre_campo, f.clase])].filter(Boolean).join(" ")).toLowerCase();
+      return fila;
+    }));
+  }
+
+  function filtrosExp(){
+    const vacio = {compartido_similar:"(ninguno)", estado_vinculo:"(sin relación)"};
+    const etiquetas = {tiene_fo:{"Sí":"Con fuente oficial", "No":"Sin fuente oficial"},
+                       tiene_consumo:{"Sí":"Con fuente de consumo", "No":"Sin fuente de consumo"}};
+    const defs = [["dominio","Dominio"], ["criticidad","Criticidad"], ["compartido_similar","Compartido / similar"],
+      REL ? ["estado_vinculo","Estado del vínculo"] : null, ["tipo_atributo","Tipo de atributo"], ["es_dato_personal","Dato personal"],
+      ["tiene_fo","Fuente oficial"], ["tiene_consumo","Fuente de consumo"], ["estructura","Estructura"], ["reporte","Reporte"],
+      ["proyecto","Proyecto"], ["proceso","Proceso"]].filter(Boolean);
+    return defs.map(([campo, titulo]) => {
+      const n = new Map();
+      for (const f of FILAS_EXP) n.set(f[campo] || "", (n.get(f[campo] || "") || 0) + 1);
+      const opciones = [...n].map(([valor, cuantos]) => ({valor, n:cuantos,
+        etiqueta: campo === "dominio" ? valor + " · " + (porCodigo.get(valor) || {}).nombre
+          : (etiquetas[campo] || {})[valor] || valor || vacio[campo] || "(vacío)"}))
+        .sort((a, b) => a.etiqueta.localeCompare(b.etiqueta, "es", {numeric:true}));
+      if (!EXP.sel[campo]) EXP.sel[campo] = new Set();
+      return {campo, titulo, opciones};
+    });
+  }
+
+  function filasFiltradasExp(){
+    const palabras = sinTildes(EXP.texto).toLowerCase().split(/\s+/).filter(Boolean);
+    const activos = Object.entries(EXP.sel).filter(([, s]) => s.size);
+    const filas = FILAS_EXP.filter(f => activos.every(([c, s]) => s.has(f[c] || "")) &&
+      palabras.every(p => f._buscar.includes(p)));
+    const {campo, asc} = EXP.orden;
+    filas.sort((a, b) => {
+      const x = a[campo], y = b[campo];
+      const r = NUMERICAS_EXP.has(campo) ? (x - y) : String(x || "").localeCompare(String(y || ""), "es", {numeric:true});
+      return asc ? r : -r;
+    });
+    return filas;
+  }
+
+  function leerColumnasGuardadas(){
+    try {
+      const v = JSON.parse(localStorage.getItem(CLAVE_COLS) || "null");
+      if (Array.isArray(v)) { const ok = v.filter(k => COLS_EXP.some(c => c[0] === k)); if (ok.length) return ok; }
+    } catch (e) { /* almacenamiento no disponible: se usan las columnas por defecto */ }
+    return COLS_EXP.filter(c => c[4]).map(c => c[0]);
+  }
+  function guardarColumnas(){ try { localStorage.setItem(CLAVE_COLS, JSON.stringify(EXP.columnas)); } catch (e) {} }
+
+  // Desplegable de seleccion multiple (filtro o selector de columnas).
+  function desplegableMulti(titulo, opciones, seleccion, alCambiar, conConteo){
+    const insignia = el("span", {clase:"cuenta"});
+    const refrescar = () => { insignia.textContent = String(seleccion.size); insignia.hidden = !seleccion.size; };
+    const cajas = [];
+    const lista = el("div", {clase:"filtro-lista"}, opciones.map(o => {
+      const c = el("input", {type:"checkbox"}); c.checked = seleccion.has(o.valor);
+      c.addEventListener("change", () => { c.checked ? seleccion.add(o.valor) : seleccion.delete(o.valor); refrescar(); alCambiar(); });
+      const fila = el("label", {clase:"opcion-filtro"}, [c, el("span", {texto:o.etiqueta}), conConteo ? el("span", {clase:"nota", texto:String(o.n)}) : null]);
+      cajas.push([c, o, fila]);
+      return fila;
+    }));
+    const visibles = () => cajas.filter(([, , fila]) => fila.style.display !== "none");
+    const buscador = opciones.length > 8 ? el("input", {type:"search", clase:"filtro-buscar", placeholder:"Buscar…"}) : null;
+    if (buscador) buscador.addEventListener("input", () => {
+      const q = sinTildes(buscador.value).toLowerCase();
+      cajas.forEach(([, o, fila]) => { fila.style.display = sinTildes(o.etiqueta).toLowerCase().includes(q) ? "" : "none"; });
+    });
+    const botones = el("div", {clase:"filtro-botones"}, [
+      el("button", {type:"button", texto:"Todos", onclick: () => { visibles().forEach(([c, o]) => { c.checked = true; seleccion.add(o.valor); }); refrescar(); alCambiar(); }}),
+      el("button", {type:"button", texto:"Ninguno", onclick: () => { visibles().forEach(([c, o]) => { c.checked = false; seleccion.delete(o.valor); }); refrescar(); alCambiar(); }}),
+    ]);
+    const det = el("details", {clase:"filtro"}, [el("summary", null, [titulo, insignia]),
+      el("div", {clase:"filtro-panel"}, [buscador, botones, lista])]);
+    det.addEventListener("toggle", () => {
+      if (det.open) document.querySelectorAll("details.filtro[open]").forEach(x => { if (x !== det) x.open = false; });
+    });
+    det.refrescar = () => { cajas.forEach(([c, o]) => { c.checked = seleccion.has(o.valor); }); refrescar(); };
+    refrescar();
+    return det;
+  }
+  document.addEventListener("click", e => {
+    if (!e.target.closest("details.filtro")) document.querySelectorAll("details.filtro[open]").forEach(x => { x.open = false; });
+  });
+
+  function vistaExplorador(d){
+    if (!FILAS_EXP) FILAS_EXP = construirFilasExp();
+    if (!EXP.columnas) EXP.columnas = leerColumnasGuardadas();
+    const filtros = filtrosExp();
+    if (d) { EXP.sel.dominio = new Set([d.codigo]); EXP.pagina = 0; }   // el menu lateral actua como filtro de dominio
+
+    const resultado = el("div", {clase:"exp-resultado"});
+    const pintar = () => { EXP.pagina = 0; pintarResultadoExp(resultado); };
+    const desplegables = filtros.map(f => desplegableMulti(f.titulo, f.opciones, EXP.sel[f.campo], pintar, true));
+    const selCols = new Set(EXP.columnas);
+    const colsDesp = desplegableMulti("Columnas", COLS_EXP.map(c => ({valor:c[0], etiqueta:c[1]})), selCols, () => {
+      if (!selCols.size) selCols.add("codigo");
+      EXP.columnas = COLS_EXP.map(c => c[0]).filter(k => selCols.has(k));
+      guardarColumnas(); pintarResultadoExp(resultado);
+    }, false);
+    colsDesp.classList.add("filtro-columnas");
+
+    const texto = el("input", {type:"search", clase:"exp-texto", value: EXP.texto,
+      placeholder:"Buscar en código, nombre, descripción, tablas, campos, fórmulas…"});
+    let espera = null;
+    texto.addEventListener("input", () => { clearTimeout(espera); espera = setTimeout(() => { EXP.texto = texto.value; pintar(); }, 200); });
+    const limpiar = el("button", {type:"button", clase:"btn-detalle", texto:"Limpiar filtros", onclick: () => {
+      Object.values(EXP.sel).forEach(s => s.clear()); EXP.texto = ""; texto.value = "";
+      desplegables.forEach(x => x.refrescar()); pintar();
+    }});
+    const excel = el("button", {type:"button", clase:"btn-excel-exp", texto:"Descargar Excel",
+      onclick: () => descargarExplorador(filasFiltradasExp())});
+
+    const cab = el("div", {clase:"cabecera"}, [el("div", null, [el("h2", {texto:"Explorador de atributos"}),
+      el("div", {clase:"sub", texto:"Atributos activos de todos los dominios. Combina filtros, elige las columnas y descarga el resultado."})])]);
+    const barra = el("div", {clase:"exp-barra"}, [
+      el("div", {clase:"exp-fila"}, [texto, excel]),
+      el("div", {clase:"exp-fila exp-filtros"}, [...desplegables, colsDesp, limpiar]),
+    ]);
+    pintarResultadoExp(resultado);
+    return [cab, barra, resultado];
+  }
+
+  function pintarResultadoExp(cont){
+    const filas = filasFiltradasExp();
+    const cols = COLS_EXP.filter(c => EXP.columnas.includes(c[0]));
+    const paginas = Math.max(1, Math.ceil(filas.length / EXP.porPagina));
+    EXP.pagina = Math.min(EXP.pagina, paginas - 1);
+    const desde = EXP.pagina * EXP.porPagina, pagina = filas.slice(desde, desde + EXP.porPagina);
+    const dominios = new Set(filas.map(f => f.dominio)).size;
+
+    const nav = el("div", {clase:"exp-nav"}, [
+      el("span", {clase:"nota", texto: filas.length + " de " + FILAS_EXP.length + " atributos · " + dominios + " dominio(s)" +
+        (filas.length ? " · mostrando " + (desde + 1) + "–" + (desde + pagina.length) : "")}),
+      paginas > 1 ? el("span", {clase:"exp-paginas"}, [
+        el("button", {type:"button", texto:"‹ Anterior", disabled: EXP.pagina === 0 ? "" : null,
+          onclick: () => { EXP.pagina--; pintarResultadoExp(cont); }}),
+        el("span", {texto:"Página " + (EXP.pagina + 1) + " de " + paginas}),
+        el("button", {type:"button", texto:"Siguiente ›", disabled: EXP.pagina >= paginas - 1 ? "" : null,
+          onclick: () => { EXP.pagina++; pintarResultadoExp(cont); }}),
+      ]) : null,
+    ]);
+    if (!filas.length){ cont.replaceChildren(nav, el("div", {clase:"vacio", texto:"Ningún atributo cumple los filtros."})); return; }
+
+    const thead = el("thead", null, el("tr", null, cols.map(([k, etq]) => {
+      const activo = EXP.orden.campo === k;
+      return el("th", {clase:"ordenable", title:"Ordenar por " + etq, onclick: () => {
+        EXP.orden = {campo:k, asc: activo ? !EXP.orden.asc : true}; pintarResultadoExp(cont);
+      }}, [etq, activo ? (EXP.orden.asc ? " ▲" : " ▼") : ""]);
+    })));
+    const tbody = el("tbody", null, pagina.map(f => el("tr", null, cols.map(([k, , , largo]) => {
+      if (k === "codigo") return el("td", null, el("button", {type:"button", clase:"enlace-atributo", texto:f.codigo,
+        title:"Ver el atributo en «Atributos y fuentes»", onclick: () => {
+          estado.dominio = f.dominio; estado.seccion = "atributos"; estado.filtroAtributo = f.nombre_atributo; actualizar(); }}));
+      return el("td", {clase: largo ? "largo" : null, texto: v(f[k] === 0 ? "0" : f[k])});
+    }))));
+    cont.replaceChildren(nav, el("div", {clase:"tabla-wrap exp-tabla"}, el("table", null, [thead, tbody])));
+  }
+
+  function bajarArchivo(blob, nombre){
+    const url = URL.createObjectURL(blob);
+    const a = el("a", {href:url, download:nombre});
+    document.body.append(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+  }
+
+  function descargarExplorador(filas){
+    const cols = COLS_EXP.filter(c => EXP.columnas.includes(c[0]));
+    const base = f => ({dominio:f.dominio, codigo:f.codigo, nombre_atributo:f.nombre_atributo});
+    const colsBase = [["dominio","Dominio",10], ["codigo","Código del atributo",14], ["nombre_atributo","Nombre del atributo",34]];
+    const hojas = [
+      {nombre:"Resultado", columnas: cols.map(([k, etq, ancho, largo]) => [k, etq, ancho, largo]),
+       filas: filas.map(f => Object.fromEntries(cols.map(([k]) => [k, f[k]])))},   // n_* y resta salen como numero
+      {nombre:"Fuentes oficiales", columnas: colsBase.concat([["servidor","Servidor",18], ["base_datos","Base de datos",40],
+        ["tabla","Tabla / archivo",28], ["nombre_campo","Campo",24], ["es_fuente_primaria","Primaria",9], ["tipo_campo","Tipo de campo",12],
+        ["longitud_campo","Longitud",9], ["acepta_valores_nulos","Acepta nulos",9], ["formula_calculo","Fórmula de cálculo",70,1],
+        ["lista_valores_validos","Valores válidos",50,1], ["fecha_aprobacion","Fecha de aprobación",13], ["version","Versión",8]]),
+       filas: filas.flatMap(f => f._a.fuentes_oficiales.map(x => ({...x, ...base(f)})))},
+      {nombre:"Fuentes de consumo", columnas: colsBase.concat([["clase","Clase",14], ["servidor","Servidor",18],
+        ["base_datos","Base de datos / colección",32], ["tabla","Tabla",28], ["nombre_campo","Campo",24], ["fecha_aprobacion","Fecha de aprobación",13]]),
+       filas: filas.flatMap(f => f._a.fuentes_consumo.map(x => ({...x, ...base(f)})))},
+    ];
+    const etiquetasFiltro = Object.fromEntries(filtrosExp().map(f => [f.campo, f]));
+    const aplicados = Object.entries(EXP.sel).filter(([, s]) => s.size).map(([c, s]) => {
+      const def = etiquetasFiltro[c];
+      return {campo: def ? def.titulo : c, valor: [...s].map(x => ((def && def.opciones.find(o => o.valor === x)) || {etiqueta:x}).etiqueta).join(", ")};
+    });
+    const generado = (document.querySelector(".marca small") || {}).textContent || "";
+    hojas.push({nombre:"Filtros", columnas:[["campo","Dato",28], ["valor","Valor",80,1]], filas: [
+      {campo:"Texto buscado", valor: EXP.texto || "(sin texto)"}, ...aplicados,
+      {campo:"Atributos", valor: filas.length + " de " + FILAS_EXP.length},
+      {campo:"Fuentes oficiales", valor: hojas[1].filas.length}, {campo:"Fuentes de consumo", valor: hojas[2].filas.length},
+      {campo:"Columnas de «Resultado»", valor: cols.map(c => c[1]).join(", ")},
+      {campo:"Sitio", valor: generado}, {campo:"Descargado", valor: new Date().toLocaleString("es")},
+    ]});
+    const {blob, recortes} = libroXlsx(hojas);
+    const t = new Date(), dos = n => String(n).padStart(2, "0");
+    bajarArchivo(blob, "explorador_atributos_" + t.getFullYear() + dos(t.getMonth() + 1) + dos(t.getDate()) + "_" +
+      dos(t.getHours()) + dos(t.getMinutes()) + ".xlsx");
+    if (recortes) alert(recortes + " celda(s) superaban el límite de Excel (32.767 caracteres) y se recortaron.");
+  }
+
   function pintarContenido(){
     const main = document.getElementById("contenido");
     const d = estado.dominio ? porCodigo.get(estado.dominio) : null;
@@ -1645,6 +1938,7 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
     obsEtiquetas.disconnect();
     if (estado.seccion === "relaciones") nodos = vistaRelaciones(d);
     else if (estado.seccion === "indicadores") nodos = vistaIndicadores(d);
+    else if (estado.seccion === "explorador") nodos = vistaExplorador(d);
     else if (estado.seccion === "terminos") nodos = vistaTerminos(d);
     else if (!d) nodos = vistaResumen();
     else if (estado.seccion === "atributos") nodos = vistaAtributos(d);

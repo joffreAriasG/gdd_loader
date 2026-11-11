@@ -274,21 +274,25 @@ vis-network 9.1.9 va incrustado (`exportar/recursos`, licencia MIT).
 
 ## Sitio de consulta por dominio (v0.10.0)
 
-HTML autocontenido (sin internet ni servidor) con menú lateral y seis secciones.
+HTML autocontenido (sin internet ni servidor) con menú lateral y siete secciones.
 **Solo lectura**: lee `gdd.*` (registros activos); no usa staging.
 
 1. **Dominio y estructura**: datos del dominio, responsables (hoja Estructura) y respaldos.
 2. **Atributos y fuentes**: cada atributo con sus fuentes oficiales (fórmula y valores válidos en fila
    desplegable) y sus fuentes de consumo. Botón **Descargar Excel**: `.xlsx` con los atributos visibles
    según el filtro y hojas de fuentes oficiales, fuentes de consumo y relaciones (se genera en el navegador).
-3. **Investigación**: registros de la hoja Investigación, agrupados por clasificación (sin los términos).
-4. **Glosario de términos**: los registros con clasificación "Término" de todos los dominios en una sola
+3. **Explorador de atributos** (v0.12.0): atributos de todos los dominios con filtros combinables (uno o más
+   dominios, criticidad, compartido/similar, estado del vínculo, tipo, dato personal, con/sin fuente oficial y
+   de consumo, estructura/reporte/proyecto/proceso), búsqueda de texto (incluye tablas, campos y fórmulas),
+   selector de columnas, orden por columna y descarga a Excel del resultado con sus fuentes.
+4. **Investigación**: registros de la hoja Investigación, agrupados por clasificación (sin los términos).
+5. **Glosario de términos**: los registros con clasificación "Término" de todos los dominios en una sola
    página (o los del dominio elegido), con buscador e índice A–Z.
-5. **Relaciones entre dominios**: grafo de los atributos Compartido / Similar (completo, o el dominio
+6. **Relaciones entre dominios**: grafo de los atributos Compartido / Similar (completo, o el dominio
    elegido con sus vecinos), con la calidad de vínculos. Usa la vista `gdd.v_relacion_atributo`
    (migración `20261105_vistas_relacion_dominio.sql`); si no existe, el sitio se genera igual y la
    sección lo informa.
-6. **Indicadores** (v0.11.0): puntaje de fuente oficial por dominio (parte de 100; cada atributo sin
+7. **Indicadores** (v0.11.0): puntaje de fuente oficial por dominio (parte de 100; cada atributo sin
    fuente oficial resta 5 si es crítico y está marcado en Estructura, 3 si solo es crítico y 1 en otro
    caso; mínimo 0), atributos críticos / no críticos con y sin fuente, estructura completa (roles 1 a 4),
    fuentes de consumo, respaldos, glosario y vínculos. Cada gráfico tiene su vista de tabla.

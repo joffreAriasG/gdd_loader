@@ -308,6 +308,17 @@ def test_indicadores_en_el_menu():
     assert '{id:"indicadores", titulo:"Indicadores"}' in html and "function vistaIndicadores" in html
 
 
+def test_explorador_de_atributos_en_el_menu():
+    html = generar_html(construir_modelo(_datos(), _grafo_sintetico()), "x")
+    assert '{id:"explorador", titulo:"Explorador de atributos"}' in html
+    for fn in ("function vistaExplorador", "function filasFiltradasExp", "function descargarExplorador", "function desplegableMulti"):
+        assert fn in html
+    # filtros pedidos: dominio, criticidad, compartido/similar (y columnas seleccionables)
+    for filtro in ('["dominio","Dominio"]', '["criticidad","Criticidad"]', '["compartido_similar","Compartido / similar"]'):
+        assert filtro in html
+    assert not re.search(r'(src|href)="https?://', html)
+
+
 def test_resolver_ruta_salida():
     ahora = datetime.datetime(2026, 11, 9, 21, 5)
     assert resolver_ruta_salida("C:/x", ahora) == Path("C:/x") / "sitio_dominios_20261109_2105.html"
