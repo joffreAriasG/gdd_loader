@@ -9,9 +9,12 @@ from decimal import Decimal
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from gdd_loader.exportar.sitio_dominios import construir_modelo, generar_html
+import pytest
+
+from gdd_loader.exportar.sitio_dominios import (PAGINAS, comprimir_datos, construir_modelo, descomprimir_datos,
+                                                generar_html, generar_sitio, modelo_para_seccion)
 from gdd_loader.load import sitio_repository
-from gdd_loader.sitio_cli import resolver_ruta_salida
+from gdd_loader.sitio_cli import escribir_sitio, paginas_excedidas, resolver_ruta_salida
 
 
 def _dom(cod, nombre=None):
@@ -38,6 +41,16 @@ def _fo(cod_dom, cod_attr, campo, primaria=True):
 def _fc(cod_dom, cod_attr, campo, clase="Bronce"):
     return {"codigo_dominio": cod_dom, "codigo_atributo": cod_attr, "servidor": "S3", "base_datos": "coleccion",
             "tabla": "tabla_bv", "nombre_campo": campo, "clase": clase, "fecha_aprobacion": datetime.date(2026, 10, 5)}
+
+
+def _modelo_del_html(html: str) -> dict:
+    """Datos embebidos (gzip + base64) de una pagina generada."""
+    bloque = re.search(r'<script id="datos" type="text/plain" data-formato="gzip-base64">(.*?)</script>', html, re.S)
+    return descomprimir_datos(bloque.group(1))
+
+
+def _config_del_html(html: str):
+    return json.loads(re.search(r'<script id="config" type="application/json">(.*?)</script>', html, re.S).group(1))
 
 
 def _datos(**extra):
@@ -110,13 +123,13 @@ def test_html_autocontenido_y_escapa_script():
     datos["investigacion"][0]["descripcion"] = "</script><script>alert(1)</script>"
     html = generar_html(construir_modelo(datos), "2026-11-09 21:00", "Glosario <PRUEBAS>")
     assert "</script><script>alert(1)" not in html
-    assert "<\\/script>" in html
     assert "Glosario &lt;PRUEBAS&gt;" in html
     assert not re.search(r'(src|href)="https?://', html)
-    # el JSON embebido se puede leer de vuelta
-    bloque = re.search(r'<script id="datos" type="application/json">(.*?)</script>', html, re.S).group(1)
-    modelo = json.loads(bloque.replace("<\\/", "</"))
+    # los datos embebidos (comprimidos) se leen de vuelta completos
+    modelo = _modelo_del_html(html)
     assert modelo["dominios"][0]["codigo"] == "ADS"
+    assert modelo["dominios"][0]["investigacion"][0]["descripcion"] == "</script><script>alert(1)</script>"
+    assert _config_del_html(html) is None      # un solo archivo
 
 
 def test_html_tiene_las_tres_secciones():
@@ -175,13 +188,12 @@ def test_relaciones_cuarta_seccion_e_incrusta_vis_solo_si_hay_grafo():
     con = generar_html(construir_modelo(_datos(), _grafo_sintetico()), "x")
     assert "Relaciones entre dominios" in con and "function vistaRelaciones" in con
     assert _inicio_vis() in con
-    bloque = re.search(r'<script id="datos" type="application/json">(.*?)</script>', con, re.S).group(1)
-    rel = json.loads(bloque.replace("<\\/", "</"))["relaciones"]
+    rel = _modelo_del_html(con)["relaciones"]
     assert rel["resumen"]["n_aristas"] == 1 and rel["aristas"][0]["atributos"][0]["codigo_origen"] == "ADS-2"
 
     sin = generar_html(construir_modelo(_datos()), "x")
     assert _inicio_vis() not in sin            # sin vista: no se incrustan ~690 KB de vis-network
-    assert '"relaciones": null' in sin
+    assert _modelo_del_html(sin)["relaciones"] is None
     assert "falta la vista" in sin             # la seccion 4 lo informa
 
 
@@ -321,7 +333,7 @@ def test_explorador_de_atributos_en_el_menu():
 
 def test_resolver_ruta_salida():
     ahora = datetime.datetime(2026, 11, 9, 21, 5)
-    assert resolver_ruta_salida("C:/x", ahora) == Path("C:/x") / "sitio_dominios_20261109_2105.html"
+    assert resolver_ruta_salida("C:/x", ahora) == Path("C:/x") / "sitio_dominios_20261109_2105"   # carpeta del sitio
     assert resolver_ruta_salida("a/sitio.html", ahora) == Path("a/sitio.html")
 
 
@@ -329,12 +341,23 @@ def test_leer_todo_ejecuta_una_consulta_por_entidad():
     conn = MagicMock()
     fila = MagicMock()
     fila._mapping = {"codigo_dominio": "ADS"}
-    conn.execute.return_value = [fila]
+    columna = MagicMock()
+    columna.scalar.return_value = 8                     # COL_LENGTH de id_estado_vigencia: existe
+    conn.execute.side_effect = lambda sql: columna if sql is sitio_repository.SQL_TIENE_ESTADO_VIGENCIA else [fila]
     datos = sitio_repository.leer_todo(conn)
     assert set(datos) == {"dominios", "roles", "responsables", "respaldos", "atributos",
                           "fuentes_oficiales", "fuentes_consumo", "investigacion"}
-    assert conn.execute.call_count == 8
+    assert conn.execute.call_count == 9                 # comprobacion de la columna + 8 entidades
     assert datos["dominios"] == [{"codigo_dominio": "ADS"}]
+    assert "estado_vigencia" in str(sitio_repository.SQL_DOMINIOS)
+
+
+def test_leer_todo_sin_la_migracion_de_estado_se_detiene():
+    conn = MagicMock()
+    conn.execute.return_value.scalar.return_value = None   # la columna no existe
+    with pytest.raises(sitio_repository.FaltaEstadoVigenciaError, match="20261111_dominio_estado_vigencia"):
+        sitio_repository.leer_todo(conn)
+    assert conn.execute.call_count == 1                     # no lee nada mas
 
 
 def test_consultas_no_leen_lo_que_el_sitio_no_muestra():
@@ -348,3 +371,193 @@ def test_consultas_solo_lectura():
         texto = str(sql).upper()
         assert texto.strip().startswith("SELECT")
         assert not re.search(r"\b(INSERT|UPDATE|DELETE|MERGE|DROP|ALTER|TRUNCATE|EXEC)\b", texto)
+
+
+# --- responsables agrupados por persona (v0.13.0) ---
+
+def _resp(cod, nombre, rol="Dueño de Dominio", area="Seguros"):
+    return {"codigo_dominio": cod, "id_rol": 3, "rol": rol, "area": area, "codigo_plaza": "P", "nombre_plaza": "Plaza",
+            "nombre_responsable": nombre, "fecha_aprobada": None}
+
+
+def test_responsables_agrupados_por_persona():
+    from gdd_loader.exportar.sitio_dominios import agrupar_responsables, clave_persona
+    assert clave_persona("  José   PÉREZ ") == clave_persona("jose perez") == "jose perez"
+    datos = _datos(responsables=[
+        _resp("ADS", "José Pérez", rol="Dueño de Dominio"),
+        _resp("ADS", "jose  perez", rol="Data Steward Calidad"),     # misma persona, otro rol, mismo dominio
+        _resp("CLI", "JOSÉ PÉREZ", rol="Coordinador de Dominio", area="Clientes"),
+        _resp("CLI", "Ana Ruiz"),
+        _resp("CLI", None),                                            # sin nombre: no se agrupa
+        _resp("CLI", "  "),
+    ])
+    m = construir_modelo(datos)
+    R = m["resumen"]["responsables"]
+    assert m["resumen"]["totales"]["estructura"] == R["asignaciones"] == 6
+    assert R["personas"] == 2 and R["asignaciones_sin_nombre"] == 2
+    assert R["personas_varios_dominios"] == 1 and R["personas_varias_asignaciones"] == 1
+    assert R["por_n_dominios"] == [[1, 1], [2, 1]]
+    jose, ana = R["por_persona"]                                       # orden: mas asignaciones primero
+    assert jose == {"nombre": "José Pérez", "asignaciones": 3, "n_dominios": 2, "dominios": ["ADS", "CLI"],
+                    "roles": ["Coordinador de Dominio", "Data Steward Calidad", "Dueño de Dominio"],
+                    "areas": ["Clientes", "Seguros"]}
+    assert ana["asignaciones"] == 1 and ana["dominios"] == ["CLI"]
+    assert agrupar_responsables([])["por_n_dominios"] == [] and agrupar_responsables([])["personas"] == 0
+
+
+def test_responsables_por_persona_en_resumen_e_indicadores():
+    html = generar_html(construir_modelo(_datos()), "x")
+    assert "function tablaPersonas" in html and "function notaResponsables" in html
+    assert html.count('tarjeta("Responsables por persona"') == 2      # resumen de dominios e indicadores
+    for etiqueta in ("Dominios activos", "Total de atributos", "Registros de fuente oficial", "Registros de fuente de consumo",
+                     "Registros de responsables", "Registros de investigación"):
+        assert html.count('["' + etiqueta + '"') == (1 if etiqueta == "Dominios activos" else 2)   # resumen y ficha
+    paginas = generar_sitio(construir_modelo(_datos()), "x")
+    assert all(_modelo_del_html(h)["resumen"]["responsables"]["personas"] == 1 for h in paginas.values())
+
+
+# --- estado de vigencia del dominio (v0.13.0) ---
+
+def _datos_vigencia():
+    """ADS Confidencial (con fuentes reales), CLI Activo, OLD Inactivo con todo tipo de registros."""
+    dom = lambda cod, estado: {**_dom(cod), "estado_vigencia": estado}
+    return _datos(
+        dominios=[dom("ADS", "Confidencial"), dom("CLI", "Activo"), dom("OLD", "Inactivo")],
+        responsables=_datos()["responsables"] + [_resp("OLD", "Persona Vieja")],
+        atributos=_datos()["atributos"] + [_attr("OLD", 1)],
+        fuentes_oficiales=_datos()["fuentes_oficiales"] + [_fo("OLD", 1, "CAMPO_VIEJO"), _fo("CLI", 1, "CAMPO_CLI")],
+        fuentes_consumo=_datos()["fuentes_consumo"] + [_fc("OLD", 1, "campo_viejo")],
+        investigacion=_datos()["investigacion"] + [{"codigo_dominio": "OLD", "clasificacion": "Norma", "nombre": "N",
+                                                    "descripcion": "D", "referencia_normativa": None}],
+    )
+
+
+def test_clasificar_vigencia():
+    from gdd_loader.exportar.sitio_dominios import clasificar_vigencia
+    assert clasificar_vigencia("Activo") == clasificar_vigencia(None) == clasificar_vigencia("") == "Activo"
+    assert clasificar_vigencia(" INACTIVO ") == "Inactivo"
+    assert clasificar_vigencia("Confidencial") == "Confidencial"
+    assert clasificar_vigencia("Otro estado") == "Confidencial"     # desconocido: no publica fuentes
+
+
+def test_dominio_inactivo_no_se_publica_y_no_cuenta_como_huerfano():
+    m = construir_modelo(_datos_vigencia())
+    assert [d["codigo"] for d in m["dominios"]] == ["ADS", "CLI"]
+    r = m["resumen"]
+    assert r["n_dominios"] == 2 and r["n_inactivos"] == 1 and r["n_confidenciales"] == 1
+    assert r["huerfanos"] == {}
+    assert r["excluidos_inactivos"] == {"responsables": 1, "atributos": 1, "investigacion": 1,
+                                        "fuentes_oficiales": 1, "fuentes_consumo": 1}
+    assert r["totales"]["atributos"] == 3 and r["responsables"]["personas"] == 1   # sin "Persona Vieja"
+    html = generar_html(m, "x")
+    assert "Persona Vieja" not in json.dumps(_modelo_del_html(html), ensure_ascii=False)
+
+
+def test_dominio_confidencial_sin_detalle_de_fuentes_pero_con_conteos_e_indicadores():
+    m = construir_modelo(_datos_vigencia())
+    ads, cli = m["dominios"]
+    assert ads["estado_vigencia"] == "Confidencial" and cli["estado_vigencia"] == "Activo"
+    a2 = next(a for a in ads["atributos"] if a["codigo_atributo"] == "2")
+    assert a2["fuentes_oficiales"] == [] and a2["fuentes_consumo"] == []          # el detalle no viaja
+    assert a2["n_fuentes_oficiales"] == 2 and a2["n_fuentes_consumo"] == 1          # la cantidad si
+    assert ads["conteos"]["fuentes_oficiales"] == 2 and ads["conteos"]["fuentes_consumo"] == 1
+    assert ads["indicadores"]["con_fo"] == 1                                        # indicadores con datos reales
+    assert cli["atributos"][0]["fuentes_oficiales"][0]["nombre_campo"] == "CAMPO_CLI"  # Activo: completo
+    for html in [generar_html(m, "x")] + list(generar_sitio(m, "x").values()):
+        datos = json.dumps(_modelo_del_html(html), ensure_ascii=False)
+        assert "CAMPO_A" not in datos and "CAMPO_B" not in datos and "campo_x" not in datos
+        assert "CAMPO_VIEJO" not in datos
+
+
+def test_relaciones_sin_dominios_inactivos():
+    from gdd_loader.exportar.grafo_relaciones import construir_modelo as construir_grafo
+    from gdd_loader.exportar.sitio_dominios import (codigos_inactivos, describir_estado_inactivo,
+                                                    filtrar_relaciones_vigencia)
+    assert codigos_inactivos(_datos_vigencia()["dominios"]) == {"OLD"}
+    dominios = [{"id_dominio": i, "codigo_dominio": c, "nombre_dominio": c, "tipo_dominio": None, "n_atributos_activos": 1}
+                for i, c in ((1, "ADS"), (2, "CLI"), (3, "OLD"))]
+    rel = lambda io, co, idd, cd: {"id_atributo_origen": io * 10, "codigo_atributo_origen": 1, "nombre_atributo_origen": "A",
+                                   "id_dominio_origen": io, "codigo_dominio_origen": co, "nombre_dominio_origen": co,
+                                   "tipo_relacion": "Compartido", "id_atributo_destino": idd * 10, "nombre_atributo_destino": "B",
+                                   "atributo_destino_activo": True, "id_dominio_destino": idd, "codigo_dominio_destino": cd,
+                                   "nombre_dominio_destino": cd, "estado_vinculo": "RESUELTO"}
+    doms, rels = filtrar_relaciones_vigencia(dominios, [rel(1, "ADS", 2, "CLI"), rel(1, "ADS", 3, "OLD"), rel(3, "OLD", 2, "CLI")],
+                                             {"OLD"})
+    modelo = describir_estado_inactivo(construir_grafo(doms, rels))
+    assert [n["codigo"] for n in modelo["nodos"]] == ["ADS", "CLI"]                 # sin nodo OLD
+    assert len(modelo["aristas"]) == 1 and [p["estado"] for p in modelo["problemas"]] == ["DOMINIO_INACTIVO"]
+    assert "Inactivo" in modelo["descripcion_estado"]["DOMINIO_INACTIVO"]
+
+
+def test_explorador_fuentes_en_columnas_separadas_y_estado_del_dominio():
+    html = generar_html(construir_modelo(_datos_vigencia()), "x")
+    for col in ('["fo_servidor","Servidor (f. oficial)"', '["fo_base_datos"', '["fo_tabla"', '["fo_campo"',
+                '["fc_clase"', '["fc_servidor"', '["fc_base_datos"', '["fc_tabla"', '["fc_campo"',
+                '["estado_vigencia","Estado del dominio"'):
+        assert col in html
+    assert '["fuentes_oficiales","Fuentes oficiales",60' not in html and '["fuentes_consumo","Fuentes de consumo",60' not in html
+    assert 'const OCULTO_CONF = "(confidencial)"' in html and "function etqConf" not in html and "const etqConf" in html
+
+
+# --- sitio de varias paginas (v0.13.0) ---
+
+def test_datos_comprimidos_ida_y_vuelta_y_deterministas():
+    modelo = construir_modelo(_datos(), _grafo_sintetico())
+    texto = comprimir_datos(modelo)
+    assert re.fullmatch(r"[A-Za-z0-9+/=]+", texto)          # seguro dentro de <script>
+    assert descomprimir_datos(texto) == json.loads(json.dumps(modelo))
+    assert comprimir_datos(modelo) == texto                 # mismo modelo, mismo archivo
+
+
+def test_generar_sitio_una_pagina_por_seccion_con_index():
+    paginas = generar_sitio(construir_modelo(_datos(), _grafo_sintetico()), "2026-11-11 10:00", "Glosario")
+    assert list(paginas) == ["index.html", "atributos.html", "explorador.html", "investigacion.html",
+                             "terminos.html", "relaciones.html", "indicadores.html"]
+    for seccion, archivo in PAGINAS.items():
+        html = paginas[archivo]
+        assert _config_del_html(html) == {"seccion": seccion, "paginas": PAGINAS}
+        assert "<h1>Glosario</h1>" in html                   # mismo diseno y menu en todas
+        assert not re.search(r'(src|href)="https?://', html)  # sin recursos externos
+        assert not re.search(r"<script[^>]+src=", html)       # ni archivos aparte: cada pagina se basta sola
+    assert "function irA" in paginas["index.html"] and 'el("a", {clase:' in paginas["index.html"]
+
+
+def test_vis_network_solo_en_la_pagina_de_relaciones():
+    paginas = generar_sitio(construir_modelo(_datos(), _grafo_sintetico()), "x")
+    assert [a for a, h in paginas.items() if _inicio_vis() in h] == ["relaciones.html"]
+    sin_grafo = generar_sitio(construir_modelo(_datos()), "x")
+    assert not any(_inicio_vis() in h for h in sin_grafo.values())
+
+
+def test_cada_pagina_lleva_solo_los_datos_que_usa():
+    modelo = construir_modelo(_datos(), _grafo_sintetico())
+    paginas = {s: _modelo_del_html(h) for s, h in zip(PAGINAS, generar_sitio(modelo, "x").values())}
+    ads = {s: next(d for d in m["dominios"] if d["codigo"] == "ADS") for s, m in paginas.items()}
+    resumen = json.loads(json.dumps(modelo["resumen"]))
+    for s in PAGINAS:   # menu lateral y tabla resumen en todas
+        assert ads[s]["nombre"] and ads[s]["info"] and ads[s]["conteos"]["atributos"] == 2
+        assert paginas[s]["resumen"] == resumen
+    assert len(ads["atributos"]["atributos"]) == len(ads["explorador"]["atributos"]) == 2
+    assert ads["estructura"]["atributos"] == [] and len(ads["estructura"]["estructura"]) == 1
+    assert ads["relaciones"]["atributos"] == [] and ads["relaciones"]["investigacion"] == []
+    assert len(ads["terminos"]["investigacion"]) == 1 and ads["investigacion"]["investigacion"]
+    assert ads["indicadores"]["indicadores"]["atributos"] == 2 and ads["estructura"]["indicadores"] is None
+    assert {s for s, m in paginas.items() if m["relaciones"]} == {"atributos", "explorador", "relaciones", "indicadores"}
+    assert modelo["dominios"][0]["atributos"] and modelo["relaciones"]   # el modelo original no cambia
+
+
+def test_seccion_desconocida():
+    with pytest.raises(KeyError):
+        modelo_para_seccion(construir_modelo(_datos()), "otra")
+    with pytest.raises(ValueError):
+        generar_html(construir_modelo(_datos()), "x", seccion="otra")
+
+
+def test_paginas_excedidas_y_escribir_sitio_sin_sobrescribir(tmp_path):
+    assert paginas_excedidas({"a.html": "x" * 1_500_000, "b.html": "y"}, 1.0) == [("a.html", 1.5)]
+    destino = tmp_path / "sitio_dominios_20261111_1000"
+    escribir_sitio(destino, {"index.html": "<p>1</p>", "atributos.html": "<p>2</p>"})
+    assert sorted(p.name for p in destino.iterdir()) == ["atributos.html", "index.html"]
+    with pytest.raises(FileExistsError):
+        escribir_sitio(destino, {"index.html": "<p>otro</p>"})
+    assert (destino / "index.html").read_text(encoding="utf-8") == "<p>1</p>"

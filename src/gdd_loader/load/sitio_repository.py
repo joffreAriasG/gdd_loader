@@ -14,12 +14,21 @@ from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
 # Solo lo que muestra el sitio (2026-11-10): la ficha del dominio lleva tipo y
-# frontera; el atributo no lleva release.
+# frontera; el atributo no lleva release. estado_vigencia (v0.13.0, migracion
+# 20261111_dominio_estado_vigencia.sql): Activo / Inactivo / Confidencial.
 SQL_DOMINIOS = text("""
-    SELECT d.codigo_dominio, d.nombre_dominio, td.tipo_dominio, d.frontera
+    SELECT d.codigo_dominio, d.nombre_dominio, td.tipo_dominio, d.frontera,
+           ev.nombre_estado_vigencia AS estado_vigencia
     FROM gdd.dominio_dato d
     LEFT JOIN gdd.cat_tipo_dominio td ON td.id = d.id_tipo_dominio
+    LEFT JOIN gdd.cat_estado_vigencia_dominio ev ON ev.id = d.id_estado_vigencia
 """)
+
+SQL_TIENE_ESTADO_VIGENCIA = text("SELECT COL_LENGTH('gdd.dominio_dato', 'id_estado_vigencia')")
+
+
+class FaltaEstadoVigenciaError(RuntimeError):
+    """La base no tiene gdd.dominio_dato.id_estado_vigencia (falta correr la migracion)."""
 
 SQL_RESPONSABLES = text("""
     SELECT d.codigo_dominio, r.id_rol, cr.nombre_rol AS rol, r.area, r.codigo_plaza, r.nombre_plaza,
@@ -112,5 +121,12 @@ CONSULTAS = {
 
 
 def leer_todo(conn: Connection) -> dict[str, list[dict]]:
-    """Solo lectura. Devuelve {entidad: [filas como dict]} para todas las entidades."""
+    """Solo lectura. Devuelve {entidad: [filas como dict]} para todas las entidades.
+
+    Sin la columna de estado de vigencia se detiene: sin ella el sitio no sabria que
+    dominios son Inactivos (no se publican) o Confidenciales (sin fuentes)."""
+    if conn.execute(SQL_TIENE_ESTADO_VIGENCIA).scalar() is None:
+        raise FaltaEstadoVigenciaError(
+            "gdd.dominio_dato no tiene id_estado_vigencia. Correr antes "
+            "db/migraciones/20261111_dominio_estado_vigencia.sql en DGODELIVERY.")
     return {nombre: [dict(f._mapping) for f in conn.execute(sql)] for nombre, sql in CONSULTAS.items()}

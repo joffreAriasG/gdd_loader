@@ -297,6 +297,13 @@ HTML autocontenido (sin internet ni servidor) con menú lateral y siete seccione
    caso; mínimo 0), atributos críticos / no críticos con y sin fuente, estructura completa (roles 1 a 4),
    fuentes de consumo, respaldos, glosario y vínculos. Cada gráfico tiene su vista de tabla.
 
-`python -m gdd_loader.sitio_cli --salida "C:\ruta\carpeta"` genera `sitio_dominios_AAAAMMDD_HHMM.html`.
-El archivo contiene valores reales, incluidos los nombres de los responsables: compartirlo solo con
+`python -m gdd_loader.sitio_cli --salida "C:\ruta\carpeta"` genera la carpeta `sitio_dominios_AAAAMMDD_HHMM\`
+(v0.13.0) con `index.html` (Dominio y estructura) y una página por sección (`atributos.html`, `explorador.html`,
+`investigacion.html`, `terminos.html`, `relaciones.html`, `indicadores.html`). El diseño es el mismo; el menú
+lateral enlaza las páginas y conserva el dominio elegido. Cada página es autocontenida y lleva solo los datos que
+usa, comprimidos (gzip + base64, unas 9 veces menos); el navegador los descomprime al abrirla (Edge o Chrome
+recientes). Así cada archivo queda muy por debajo del límite de 10 MB por archivo de SharePoint: se sube la
+carpeta completa y se abre `index.html`. `--max-mb` (por defecto 10) avisa si alguna página lo supera.
+Con `--salida sitio.html` se genera un solo archivo con todas las secciones, como antes.
+Los archivos contienen valores reales, incluidos los nombres de los responsables: compartirlo solo con
 el equipo de gobierno de datos.

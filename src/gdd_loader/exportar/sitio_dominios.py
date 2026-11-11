@@ -34,6 +34,17 @@ servidor) con menu lateral y tres secciones por dominio:
 Solo lectura: se arma con lo que load/sitio_repository.leer_todo devuelve de
 gdd.* (registros activos). construir_modelo es pura (testeable sin base).
 
+Formatos de salida:
+  - generar_sitio (v0.13.0): una pagina HTML por seccion (index.html = Dominio y
+    estructura, atributos.html, explorador.html, ...) con el mismo diseno y menu
+    lateral; el menu enlaza las paginas. Cada pagina lleva solo los datos que usa
+    (ver _CLAVES_POR_SECCION), asi ninguna depende de otra ni de archivos externos.
+    Pensado para bibliotecas como SharePoint que limitan el tamano por archivo.
+  - generar_html sin seccion: un solo HTML con todas las secciones (como v0.12.0).
+En ambos casos los datos van comprimidos (gzip + base64, ~9 veces menos) y el
+navegador los descomprime al abrir la pagina (DecompressionStream: Edge/Chrome 80+,
+Firefox 113+, Safari 16.4+).
+
 El HTML contiene los VALORES de los registros (incluidos nombres de
 responsables): se entrega solo al equipo de gobierno de datos, igual que la
 minuta. No va al repositorio.
@@ -41,6 +52,8 @@ minuta. No va al repositorio.
 
 from __future__ import annotations
 
+import base64
+import gzip
 import json
 import re
 import unicodedata
@@ -91,6 +104,63 @@ def categoria_penalizacion(atributo: dict) -> str | None:
     if es_critico(atributo.get("criticidad")):
         return "critico_estructura" if atributo.get("estructura") == "Sí" else "critico"
     return "otro"
+
+
+def clave_persona(nombre: str | None) -> str:
+    """Misma persona aunque cambien tildes, mayusculas o espacios ('José  Pérez' = 'jose perez')."""
+    return " ".join(_sin_tildes(nombre).split())
+
+
+def _grafia_preferida(grafias: dict[str, int]) -> str:
+    """Nombre a mostrar: la escritura mas frecuente; si empatan, la que tiene mas tildes y no esta
+    toda en mayusculas o minusculas ('José Pérez' antes que 'JOSE PEREZ' o 'jose perez')."""
+    def puntaje(nombre: str):
+        tildes = sum(1 for c in unicodedata.normalize("NFD", nombre) if unicodedata.category(c) == "Mn")
+        return (grafias[nombre], tildes, nombre not in (nombre.upper(), nombre.lower()), nombre)
+    return max(grafias, key=puntaje)
+
+
+def agrupar_responsables(dominios: list[dict]) -> dict:
+    """Responsables (hoja Estructura, filas activas) agrupados por persona.
+
+    Cada fila de dominio_responsable es una asignacion (persona + dominio + rol); una persona
+    puede tener varias. La persona se identifica por nombre_responsable normalizado (clave_persona).
+    [SUPUESTO] Las filas sin nombre no se agrupan: se cuentan aparte en asignaciones_sin_nombre.
+    """
+    personas: dict[str, dict] = {}
+    sin_nombre = total = 0
+    for d in dominios:
+        for r in d.get("estructura", []):
+            total += 1
+            nombre = " ".join((r.get("nombre_responsable") or "").split())
+            if not nombre:
+                sin_nombre += 1
+                continue
+            p = personas.setdefault(clave_persona(nombre), {"grafias": {}, "asignaciones": 0,
+                                                             "dominios": set(), "roles": set(), "areas": set()})
+            p["grafias"][nombre] = p["grafias"].get(nombre, 0) + 1
+            p["asignaciones"] += 1
+            p["dominios"].add(d["codigo"])
+            for campo, clave in (("roles", "rol"), ("areas", "area")):
+                if r.get(clave):
+                    p[campo].add(r[clave])
+    lista = [{"nombre": _grafia_preferida(p["grafias"]), "asignaciones": p["asignaciones"], "n_dominios": len(p["dominios"]),
+              "dominios": sorted(p["dominios"]), "roles": sorted(p["roles"]), "areas": sorted(p["areas"])}
+             for p in personas.values()]
+    lista.sort(key=lambda p: (-p["asignaciones"], -p["n_dominios"], clave_persona(p["nombre"])))
+    por_n_dominios: dict[int, int] = {}
+    for p in lista:
+        por_n_dominios[p["n_dominios"]] = por_n_dominios.get(p["n_dominios"], 0) + 1
+    return {
+        "personas": len(lista),
+        "asignaciones": total,
+        "asignaciones_sin_nombre": sin_nombre,
+        "personas_varios_dominios": sum(1 for p in lista if p["n_dominios"] > 1),
+        "personas_varias_asignaciones": sum(1 for p in lista if p["asignaciones"] > 1),
+        # [[n_dominios, personas], ...] de 1 al maximo (JSON no admite claves enteras)
+        "por_n_dominios": [[n, por_n_dominios.get(n, 0)] for n in range(1, max(por_n_dominios, default=0) + 1)],
+        "por_persona": lista,
+    }
 
 
 def calcular_indicadores(dominio: dict, vinculos: dict | None) -> dict:
@@ -166,6 +236,59 @@ def _orden_natural(valor: str):
     return (0, int(valor), "") if re.fullmatch(r"\d+", valor or "") else (1, 0, (valor or "").lower())
 
 
+# Estado de vigencia del dominio (gdd.cat_estado_vigencia_dominio, 2026-11-11), reglas del usuario:
+#   Activo       -> se publica completo.
+#   Inactivo     -> no se publica (ninguna pagina ni numero).
+#   Confidencial -> se publica con atributos e indicadores, SIN fuentes oficiales ni de consumo
+#                   (se quitan del modelo: no viajan en el HTML).
+# [SUPUESTO] Un valor desconocido se trata como Confidencial (no publica fuentes por error).
+VIGENCIA_ACTIVO, VIGENCIA_INACTIVO, VIGENCIA_CONFIDENCIAL = "Activo", "Inactivo", "Confidencial"
+ESTADO_DOMINIO_INACTIVO = "DOMINIO_INACTIVO"
+
+
+def clasificar_vigencia(estado: str | None) -> str:
+    """Texto de cat_estado_vigencia_dominio -> Activo / Inactivo / Confidencial.
+    Vacio = Activo (la columna es NOT NULL con Activo por defecto)."""
+    e = _sin_tildes(estado)
+    if e in ("", "activo"):
+        return VIGENCIA_ACTIVO
+    if e == "inactivo":
+        return VIGENCIA_INACTIVO
+    return VIGENCIA_CONFIDENCIAL
+
+
+def codigos_inactivos(filas_dominio: list[dict]) -> set[str]:
+    """Codigos de dominio en estado Inactivo (filas de sitio_repository.SQL_DOMINIOS)."""
+    return {a_texto(f.get("codigo_dominio")) for f in filas_dominio
+            if clasificar_vigencia(a_texto(f.get("estado_vigencia"))) == VIGENCIA_INACTIVO}
+
+
+def filtrar_relaciones_vigencia(dominios_grafo: list[dict], relaciones: list[dict],
+                                inactivos: set[str]) -> tuple[list[dict], list[dict]]:
+    """Quita del grafo los dominios Inactivos: sus nodos y las relaciones que salen de ellos.
+    Una relacion de un dominio publicado hacia un dominio Inactivo no se dibuja: pasa a
+    "Calidad de vinculos" con estado DOMINIO_INACTIVO (cuenta como vinculo pendiente)."""
+    if not inactivos:
+        return dominios_grafo, relaciones
+    doms = [d for d in dominios_grafo if a_texto(d.get("codigo_dominio")) not in inactivos]
+    rels = []
+    for r in relaciones:
+        if a_texto(r.get("codigo_dominio_origen")) in inactivos:
+            continue
+        if a_texto(r.get("codigo_dominio_destino")) in inactivos:
+            r = {**r, "estado_vinculo": ESTADO_DOMINIO_INACTIVO}
+        rels.append(r)
+    return doms, rels
+
+
+def describir_estado_inactivo(relaciones: dict | None) -> dict | None:
+    """Agrega la descripcion de DOMINIO_INACTIVO al modelo del grafo (sin tocar el original)."""
+    if not relaciones:
+        return relaciones
+    return {**relaciones, "descripcion_estado": {**relaciones.get("descripcion_estado", {}),
+            ESTADO_DOMINIO_INACTIVO: "El atributo primario pertenece a un dominio Inactivo (no se publica en el sitio)."}}
+
+
 def construir_modelo(datos: dict[str, list[dict]], relaciones: dict | None = None) -> dict:
     """{entidad: filas} (de sitio_repository.leer_todo) -> modelo del sitio.
 
@@ -173,17 +296,25 @@ def construir_modelo(datos: dict[str, list[dict]], relaciones: dict | None = Non
     None si la vista gdd.v_relacion_atributo no esta disponible.
 
     Las filas cuyo codigo_dominio no esta en gdd.dominio_dato se cuentan como
-    huerfanas en el resumen (no se muestran en ningun dominio).
+    huerfanas en el resumen (no se muestran en ningun dominio). Los dominios
+    Inactivos y sus registros se excluyen (excluidos_inactivos); los Confidenciales
+    pierden el detalle de sus fuentes (ver VIGENCIA_*).
     """
     dominios: dict[str, dict] = {}
+    inactivos: set[str] = set()
     for fila in datos.get("dominios", []):
         t = _textos(fila)
         codigo = t.pop("codigo_dominio")
         if not codigo:
             continue
+        vigencia = clasificar_vigencia(t.pop("estado_vigencia", ""))
+        if vigencia == VIGENCIA_INACTIVO:
+            inactivos.add(codigo)
+            continue
         dominios[codigo] = {
             "codigo": codigo,
             "nombre": t.pop("nombre_dominio", ""),
+            "estado_vigencia": vigencia,
             "info": t,
             "estructura": [],
             "respaldos": [],
@@ -192,9 +323,14 @@ def construir_modelo(datos: dict[str, list[dict]], relaciones: dict | None = Non
         }
 
     huerfanos: dict[str, int] = {}
+    excluidos: dict[str, int] = {}
 
     def _destino(t: dict, entidad: str):
-        d = dominios.get(t.get("codigo_dominio", ""))
+        codigo = t.get("codigo_dominio", "")
+        if codigo in inactivos:
+            excluidos[entidad] = excluidos.get(entidad, 0) + 1
+            return None
+        d = dominios.get(codigo)
         if d is None:
             huerfanos[entidad] = huerfanos.get(entidad, 0) + 1
         return d
@@ -223,6 +359,9 @@ def construir_modelo(datos: dict[str, list[dict]], relaciones: dict | None = Non
     for entidad in ("fuentes_oficiales", "fuentes_consumo"):
         for fila in datos.get(entidad, []):
             t = _textos(fila)
+            if t.get("codigo_dominio", "") in inactivos:
+                excluidos[entidad] = excluidos.get(entidad, 0) + 1
+                continue
             a = atributos.get((t.get("codigo_dominio", ""), t.get("codigo_atributo", "")))
             if a is None:
                 huerfanos[entidad] = huerfanos.get(entidad, 0) + 1
@@ -258,6 +397,17 @@ def construir_modelo(datos: dict[str, list[dict]], relaciones: dict | None = Non
         d["indicadores"] = calcular_indicadores(
             d, vinculos.get(d["codigo"], {"resueltos": 0, "pendientes": 0}) if relaciones else None)
 
+    # Conteos e indicadores ya calculados con los datos reales; ahora, en los dominios
+    # Confidenciales, se quita el DETALLE de las fuentes (queda solo la cantidad por atributo).
+    for d in dominios.values():
+        oculto = d["estado_vigencia"] != VIGENCIA_ACTIVO
+        for a in d["atributos"]:
+            a["n_fuentes_oficiales"] = len(a["fuentes_oficiales"])
+            a["n_fuentes_consumo"] = len(a["fuentes_consumo"])
+            if oculto:
+                a["fuentes_oficiales"] = []
+                a["fuentes_consumo"] = []
+
     lista = sorted(dominios.values(), key=lambda d: d["codigo"])
     totales = {k: sum(d["conteos"][k] for d in lista) for k in
                ("estructura", "respaldos", "atributos", "fuentes_oficiales", "fuentes_consumo", "investigacion",
@@ -275,8 +425,12 @@ def construir_modelo(datos: dict[str, list[dict]], relaciones: dict | None = Non
         "resumen": {
             "n_dominios": len(lista),
             "n_dominios_con_atributos": sum(1 for d in lista if d["atributos"]),
+            "n_confidenciales": sum(1 for d in lista if d["estado_vigencia"] != VIGENCIA_ACTIVO),
+            "n_inactivos": len(inactivos),
+            "excluidos_inactivos": excluidos,
             "totales": totales,
             "huerfanos": huerfanos,
+            "responsables": agrupar_responsables(lista),
             "indicadores": {
                 "penalizacion": PENALIZACION,
                 "roles_requeridos": [{"id": i, "nombre": nombres_rol.get(i, f"Rol {i}")} for i in ROLES_REQUERIDOS],
@@ -300,16 +454,81 @@ def _json_para_script(obj) -> str:
     return json.dumps(obj, ensure_ascii=False).replace("</", "<\\/")
 
 
-def generar_html(modelo: dict, generado_en: str, titulo: str = "Glosario de datos por dominio") -> str:
-    # vis-network (~690 KB) solo se incrusta si hay modelo de relaciones.
-    vis_js = (RECURSOS / ARCHIVO_VIS).read_text(encoding="utf-8") if modelo.get("relaciones") else ""
+def comprimir_datos(obj) -> str:
+    """JSON -> gzip -> base64 (solo A-Z, a-z, 0-9, +, /, =: seguro dentro de un <script>).
+    mtime=0 para que el mismo modelo genere siempre el mismo archivo."""
+    crudo = json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return base64.b64encode(gzip.compress(crudo, compresslevel=9, mtime=0)).decode("ascii")
+
+
+def descomprimir_datos(texto: str):
+    """Inverso de comprimir_datos (para pruebas y diagnostico)."""
+    return json.loads(gzip.decompress(base64.b64decode(texto)).decode("utf-8"))
+
+
+# Una pagina por seccion (generar_sitio). El orden es el del menu lateral.
+PAGINAS = {
+    "estructura": "index.html",
+    "atributos": "atributos.html",
+    "explorador": "explorador.html",
+    "investigacion": "investigacion.html",
+    "terminos": "terminos.html",
+    "relaciones": "relaciones.html",
+    "indicadores": "indicadores.html",
+}
+
+# Datos que necesita cada pagina, ademas de "resumen" y, por dominio, de las claves
+# de _CLAVES_SIEMPRE (menu lateral y tabla resumen). Lo demas va vacio para que la
+# pagina pese menos; "relaciones" va solo donde se usa (grafo, estado del vinculo,
+# hoja Relaciones del Excel e indicador de vinculos).
+_CLAVES_SIEMPRE = frozenset({"codigo", "nombre", "estado_vigencia", "info", "conteos"})
+_CLAVES_POR_SECCION = {
+    "estructura": ({"estructura", "respaldos"}, False),
+    "atributos": ({"atributos"}, True),
+    "explorador": ({"atributos"}, True),
+    "investigacion": ({"investigacion"}, False),
+    "terminos": ({"investigacion"}, False),
+    "relaciones": (set(), True),
+    "indicadores": ({"indicadores"}, True),
+}
+
+
+def modelo_para_seccion(modelo: dict, seccion: str) -> dict:
+    """Copia del modelo con solo lo que usa la pagina de `seccion` (listas no usadas -> [],
+    otros valores no usados -> None). No modifica `modelo`."""
+    claves, con_relaciones = _CLAVES_POR_SECCION[seccion]
+    usar = _CLAVES_SIEMPRE | claves
+    dominios = [{k: (v if k in usar else ([] if isinstance(v, list) else None)) for k, v in d.items()}
+                for d in modelo["dominios"]]
+    return {**modelo, "dominios": dominios,
+            "relaciones": modelo.get("relaciones") if con_relaciones else None}
+
+
+def generar_html(modelo: dict, generado_en: str, titulo: str = "Glosario de datos por dominio",
+                 seccion: str | None = None) -> str:
+    """Sin `seccion`: un solo HTML con todas las secciones. Con `seccion`: la pagina de esa
+    seccion dentro del sitio de varias paginas (ver generar_sitio)."""
+    if seccion is not None and seccion not in PAGINAS:
+        raise ValueError(f"Seccion desconocida: {seccion}")
+    datos = modelo if seccion is None else modelo_para_seccion(modelo, seccion)
+    # vis-network (~690 KB) solo se incrusta donde se dibuja el grafo.
+    con_vis = bool(datos.get("relaciones")) and seccion in (None, "relaciones")
+    vis_js = (RECURSOS / ARCHIVO_VIS).read_text(encoding="utf-8") if con_vis else ""
+    config = None if seccion is None else {"seccion": seccion, "paginas": PAGINAS}
     return (
         _PLANTILLA
         .replace("__TITULO__", escape(titulo))
         .replace("__GENERADO__", escape(generado_en))
         .replace("__VIS_JS__", vis_js)
-        .replace("__DATOS__", _json_para_script(modelo))  # al final: los datos no se reinterpretan
+        .replace("__CONFIG__", _json_para_script(config))
+        .replace("__DATOS__", comprimir_datos(datos))  # al final: los datos no se reinterpretan
     )
+
+
+def generar_sitio(modelo: dict, generado_en: str, titulo: str = "Glosario de datos por dominio") -> dict[str, str]:
+    """Sitio de varias paginas: {nombre_archivo: html}. index.html es "Dominio y estructura"."""
+    return {archivo: generar_html(modelo, generado_en, titulo, seccion)
+            for seccion, archivo in PAGINAS.items()}
 
 
 _PLANTILLA = r"""<!doctype html>
@@ -348,13 +567,14 @@ aside{background:var(--side);color:var(--side-text);display:flex;flex-direction:
 .marca h1{font-size:16px;margin:0 0 2px;color:#fff}
 .marca small{color:var(--side-muted)}
 nav.secciones{padding:10px 10px;border-bottom:1px solid rgba(255,255,255,.12)}
-nav.secciones button{display:flex;gap:10px;align-items:center;width:100%;text-align:left;background:none;border:0;
-  color:var(--side-text);padding:9px 10px;border-radius:7px;cursor:pointer;font:inherit;margin-bottom:2px}
-nav.secciones button:hover{background:var(--side-hover)}
-nav.secciones button.activo{background:var(--amarillo);color:var(--marino);font-weight:700}
+nav.secciones button,nav.secciones a{display:flex;gap:10px;align-items:center;width:100%;text-align:left;background:none;border:0;
+  color:var(--side-text);padding:9px 10px;border-radius:7px;cursor:pointer;font:inherit;margin-bottom:2px;
+  text-decoration:none;box-sizing:border-box}
+nav.secciones button:hover,nav.secciones a:hover{background:var(--side-hover)}
+nav.secciones button.activo,nav.secciones a.activo{background:var(--amarillo);color:var(--marino);font-weight:700}
 nav.secciones .num{display:inline-grid;place-items:center;width:22px;height:22px;border-radius:50%;
   border:1.5px solid var(--amarillo);color:var(--amarillo);font-size:12px;font-weight:700;flex:none}
-nav.secciones button.activo .num{background:var(--marino);border-color:var(--marino);color:var(--amarillo)}
+nav.secciones button.activo .num,nav.secciones a.activo .num{background:var(--marino);border-color:var(--marino);color:var(--amarillo)}
 .buscador{padding:12px 14px 6px}
 .buscador input{width:100%;padding:8px 10px;border-radius:7px;border:1px solid transparent;background:#fff;color:var(--marino);font:inherit}
 .buscador input:focus{outline:2px solid var(--amarillo);outline-offset:0}
@@ -524,6 +744,8 @@ details.filtro-columnas[open] > summary,details.filtro-columnas > summary:hover{
 .exp-paginas button{background:var(--marino);color:#fff;border:0;border-radius:6px;padding:5px 10px;font:inherit;font-size:12.5px;cursor:pointer}
 .exp-paginas button:disabled{opacity:.4;cursor:default}
 .exp-tabla{max-height:68vh}
+.tabla-alta{max-height:420px}
+.nota-resp{color:var(--muted);font-size:13px;margin:0 0 12px}
 th.ordenable{cursor:pointer;user-select:none}
 th.ordenable:hover{background:var(--marino-3)}
 .enlace-atributo{background:none;border:0;padding:0;font:inherit;font-weight:700;color:var(--acento);cursor:pointer;
@@ -554,6 +776,10 @@ label.opcion{display:inline-flex;gap:6px;align-items:center;cursor:pointer;font-
 .sw{display:inline-block;width:20px;height:4px;border-radius:2px}
 .nota-red{color:var(--muted);font-size:12px;margin:4px 0 8px}
 .avisos.aviso-red{background:var(--amarillo-suave);color:var(--text);border-left-color:var(--amarillo-fuerte)}
+.avisos.aviso-conf{background:var(--chip);color:var(--text);border-left-color:var(--acento)}
+.etq-conf{display:inline-block;margin-left:8px;padding:1px 8px;border:1px solid currentColor;border-radius:999px;
+  font-size:11px;font-weight:700;letter-spacing:.02em;line-height:1.5;vertical-align:middle;white-space:nowrap;color:var(--acento)}
+aside .etq-conf{color:var(--amarillo);margin:0 6px 0 0;font-size:10px}
 .detalle-arista:not(:empty){margin-top:12px;padding-top:10px;border-top:1px dashed var(--line)}
 .detalle-arista h4{margin:0 0 4px;font-size:14px;color:var(--acento);display:flex;gap:8px;align-items:center}
 tr.clic{cursor:pointer}
@@ -635,14 +861,37 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
   <div class="etq-lista">Dominios</div>
   <ul class="dominios" id="listaDominios"></ul>
 </aside>
-<main id="contenido"></main>
+<main id="contenido"><div class="vacio" id="cargando">Cargando datos…</div></main>
 
 <script>__VIS_JS__</script>
-<script id="datos" type="application/json">__DATOS__</script>
+<script id="config" type="application/json">__CONFIG__</script>
+<script id="datos" type="text/plain" data-formato="gzip-base64">__DATOS__</script>
 <script>
-(function(){
+(async function(){
   "use strict";
-  const DATOS = JSON.parse(document.getElementById("datos").textContent);
+  // Datos comprimidos (gzip + base64): se descomprimen en el navegador, sin red.
+  async function leerDatos(){
+    const nodo = document.getElementById("datos");
+    if (nodo.dataset.formato !== "gzip-base64") return JSON.parse(nodo.textContent);
+    if (typeof DecompressionStream === "undefined") throw new Error("este navegador no puede descomprimir los datos");
+    const bin = atob(nodo.textContent.trim()), bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    const flujo = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"));
+    return JSON.parse(await new Response(flujo).text());
+  }
+  let DATOS;
+  try { DATOS = await leerDatos(); }
+  catch (e) {
+    const aviso = document.createElement("div");
+    aviso.className = "avisos";
+    aviso.textContent = "No se pudieron leer los datos del sitio (" + e.message + "). " +
+      "Ábralo con una versión reciente de Microsoft Edge o Google Chrome.";
+    document.getElementById("contenido").replaceChildren(aviso);
+    return;
+  }
+  // Sitio de varias paginas (generar_sitio): CONFIG = {seccion, paginas}; un solo archivo: null.
+  const CONFIG = JSON.parse(document.getElementById("config").textContent);
+  const MULTI = !!CONFIG;
   const SECCIONES = [
     {id:"estructura", titulo:"Dominio y estructura"},
     {id:"atributos", titulo:"Atributos y fuentes"},
@@ -653,11 +902,36 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
     {id:"indicadores", titulo:"Indicadores"},
   ];
   const porCodigo = new Map(DATOS.dominios.map(d => [d.codigo, d]));
-  const estado = {seccion:"estructura", dominio:null, filtroDominio:"", filtroAtributo:"",
+  const estado = {seccion: MULTI ? CONFIG.seccion : "estructura", dominio:null, filtroDominio:"", filtroAtributo:"",
                   tiposRel:null, aislados:false, estadoRel:"", filtroTermino:"", letraTermino:""};
+  if (MULTI) document.title = document.title + " · " + SECCIONES.find(s => s.id === CONFIG.seccion).titulo;
+
+  // #seccion/DOMINIO[/filtro de atributo]
+  function hashDe(seccion, dominio, filtroAtributo){
+    return "#" + seccion + (dominio ? "/" + encodeURIComponent(dominio) +
+      (filtroAtributo ? "/" + encodeURIComponent(filtroAtributo) : "") : "");
+  }
+  // Ir a otra seccion: en el sitio de varias paginas abre la pagina de esa seccion.
+  function irA(seccion, dominio, filtroAtributo){
+    if (MULTI && seccion !== estado.seccion){
+      location.href = CONFIG.paginas[seccion] + hashDe(seccion, dominio, filtroAtributo);
+      return;
+    }
+    estado.seccion = seccion;
+    if (dominio !== undefined) estado.dominio = dominio;
+    if (filtroAtributo !== undefined) estado.filtroAtributo = filtroAtributo;
+    actualizar();
+  }
   // "Término" sin importar tildes ni mayusculas (igual que es_termino en Python)
   const sinTildes = s => (s || "").normalize("NFD").replace(/[̀-ͯ]/g, "");
   const esTermino = r => sinTildes(r.clasificacion).trim().toLowerCase() === "termino";
+  // Estado de vigencia (Python ya excluyo los Inactivos): un dominio que no es Activo es Confidencial y
+  // llega SIN el detalle de sus fuentes; solo trae la cantidad por atributo (n_fuentes_*).
+  const esConf = d => !!d && !!d.estado_vigencia && d.estado_vigencia !== "Activo";
+  const nFO = a => a.n_fuentes_oficiales ?? a.fuentes_oficiales.length;
+  const nFC = a => a.n_fuentes_consumo ?? a.fuentes_consumo.length;
+  const AVISO_CONF = "Dominio confidencial: el detalle de las fuentes oficiales y de consumo no se publica en el sitio.";
+  const etqConf = d => esConf(d) ? el("span", {clase:"etq-conf", title:AVISO_CONF, texto:"Confidencial"}) : null;
 
   // --- utilidades: el DOM se arma con textContent (nunca innerHTML con datos)
   function el(tag, props, hijos){
@@ -701,10 +975,12 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
   // --- menu lateral
   function pintarSecciones(){
     const nav = document.getElementById("secciones");
-    nav.replaceChildren(...SECCIONES.map((s, i) => el("button", {
-      clase: s.id === estado.seccion ? "activo" : "",
-      onclick: () => { estado.seccion = s.id; actualizar(); }
-    }, [el("span", {clase:"num", texto:String(i+1)}), s.titulo])));
+    const contenido = (s, i) => [el("span", {clase:"num", texto:String(i+1)}), s.titulo];
+    nav.replaceChildren(...SECCIONES.map((s, i) => MULTI
+      ? el("a", {clase: s.id === estado.seccion ? "activo" : "", href: CONFIG.paginas[s.id] + hashDe(s.id, estado.dominio),
+                 "aria-current": s.id === estado.seccion ? "page" : null}, contenido(s, i))
+      : el("button", {clase: s.id === estado.seccion ? "activo" : "",
+                      onclick: () => { estado.seccion = s.id; actualizar(); }}, contenido(s, i))));
   }
 
   function pintarListaDominios(){
@@ -720,26 +996,45 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
         clase: d.codigo === estado.dominio ? "activo" : "", title: d.nombre,
         onclick: () => { estado.dominio = d.codigo; estado.filtroAtributo = ""; estado.letraTermino = "";
                          estado.filtroTermino = ""; actualizar(); }
-      }, [el("span", {clase:"cod", texto:d.codigo}), el("span", {clase:"nom", texto:d.nombre})])));
+      }, [el("span", {clase:"cod", texto:d.codigo}), el("span", {clase:"nom"}, [etqConf(d), d.nombre])])));
     }
     ul.replaceChildren(...items);
   }
 
   // --- portada (todos los dominios)
+  // Responsables agrupados por persona (resumen.responsables, ver agrupar_responsables en Python).
+  function notaResponsables(R){
+    return el("div", {clase:"nota-resp", texto:
+      "Cada fila de la hoja Estructura es una asignación (persona + dominio + rol). " +
+      R.personas + " persona(s) tienen " + (R.asignaciones - R.asignaciones_sin_nombre) + " asignación(es); " +
+      R.personas_varios_dominios + " está(n) en más de un dominio." +
+      (R.asignaciones_sin_nombre ? " " + R.asignaciones_sin_nombre + " asignación(es) sin nombre de responsable no se agrupan." : "")});
+  }
+  function tablaPersonas(lista, vacio){
+    const t = tabla([["nombre","Persona"], ["asignaciones","Asignaciones"], ["dominios","Dominios"], ["roles","Roles"], ["areas","Áreas"]],
+      lista.map(p => ({nombre:p.nombre, asignaciones:String(p.asignaciones), dominios:p.dominios.join(", "),
+                       roles:p.roles.join(", "), areas:p.areas.join(", ")})), vacio || "Sin responsables con nombre.");
+    t.classList.add("tabla-alta");
+    return t;
+  }
+
   function vistaResumen(){
-    const r = DATOS.resumen, t = r.totales;
+    const r = DATOS.resumen, t = r.totales, R = r.responsables;
     const sec = SECCIONES.find(s => s.id === estado.seccion);
     const kpis = el("div", {clase:"kpis"}, [
-      ["Dominios", r.n_dominios], ["Con atributos", r.n_dominios_con_atributos], ["Atributos", t.atributos],
-      ["Fuentes oficiales", t.fuentes_oficiales], ["Fuentes de consumo", t.fuentes_consumo],
-      ["Responsables", t.estructura], ["Investigación", t.investigacion], ["Términos", t.terminos],
+      // etiquetas pedidas por el usuario (2026-11-11); las personas distintas van en "Responsables por persona"
+      // Dominios activos = publicados (Activo + Confidencial); los Inactivos no se publican.
+      ["Dominios activos" + (r.n_confidenciales ? " · " + r.n_confidenciales + " confidencial" + (r.n_confidenciales === 1 ? "" : "es") : ""),
+       r.n_dominios], ["Con atributos", r.n_dominios_con_atributos], ["Total de atributos", t.atributos],
+      ["Registros de fuente oficial", t.fuentes_oficiales], ["Registros de fuente de consumo", t.fuentes_consumo],
+      ["Registros de responsables", t.estructura], ["Registros de investigación", t.investigacion], ["Términos", t.terminos],
     ].map(([e, n]) => el("div", {clase:"kpi"}, [el("b", {texto:String(n)}), el("span", {texto:e})])));
     const huerf = Object.entries(r.huerfanos || {});
     const avisos = huerf.length ? el("div", {clase:"avisos", texto:
       "Registros activos sin dominio válido en gdd.dominio_dato (no se muestran): " +
       huerf.map(([k, n]) => k + " " + n).join(", ")}) : null;
     const filas = DATOS.dominios.map(d => el("tr", {onclick: () => { estado.dominio = d.codigo; actualizar(); }}, [
-      el("td", {texto:d.codigo}), el("td", {texto:d.nombre}), el("td", {texto:v(d.info.tipo_dominio)}),
+      el("td", {texto:d.codigo}), el("td", null, [d.nombre, etqConf(d)]), el("td", {texto:v(d.info.tipo_dominio)}),
       el("td", {texto:String(d.conteos.estructura)}), el("td", {texto:String(d.conteos.atributos)}),
       el("td", {texto:String(d.conteos.fuentes_oficiales)}), el("td", {texto:String(d.conteos.fuentes_consumo)}),
       el("td", {texto:String(d.conteos.investigacion)}), el("td", {texto:String(d.conteos.terminos)}),
@@ -752,13 +1047,14 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
       el("div", {clase:"cabecera"}, [el("div", null, [el("h2", {texto:"Resumen de dominios"}),
         el("div", {clase:"sub", texto:"Elige un dominio en el menú lateral (o en la tabla) para ver la sección «" + sec.titulo + "»."})])]),
       avisos, kpis, tarjeta("Dominios", DATOS.dominios.length, tablaDom),
+      R ? tarjeta("Responsables por persona", R.personas, [notaResponsables(R), tablaPersonas(R.por_persona)]) : null,
     ];
   }
 
   function cabeceraDominio(d){
     const sec = SECCIONES.find(s => s.id === estado.seccion);
     return el("div", {clase:"cabecera"}, [
-      el("div", null, [el("h2", {texto: d.codigo + " · " + d.nombre}), el("div", {clase:"sub", texto: sec.titulo})]),
+      el("div", null, [el("h2", null, [d.codigo + " · " + d.nombre, etqConf(d)]), el("div", {clase:"sub", texto: sec.titulo})]),
     ]);
   }
 
@@ -814,9 +1110,9 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
       tarjeta("Información del dominio", null, ficha([
         ["tipo_dominio","Tipo de dominio"], ["frontera","Frontera"],
       ], i)),
-      el("div", {clase:"kpis"}, [["Responsables", d.conteos.estructura], ["Atributos", d.conteos.atributos],
-        ["Fuentes oficiales", d.conteos.fuentes_oficiales], ["Fuentes de consumo", d.conteos.fuentes_consumo],
-        ["Investigación", d.conteos.investigacion], ["Términos", d.conteos.terminos]]
+      el("div", {clase:"kpis"}, [["Registros de responsables", d.conteos.estructura], ["Total de atributos", d.conteos.atributos],
+        ["Registros de fuente oficial", d.conteos.fuentes_oficiales], ["Registros de fuente de consumo", d.conteos.fuentes_consumo],
+        ["Registros de investigación", d.conteos.investigacion], ["Términos", d.conteos.terminos]]
         .map(([e, n]) => el("div", {clase:"kpi"}, [el("b", {texto:String(n)}), el("span", {texto:e})]))),
       tarjeta("Estructura (responsables)", d.estructura.length, vistaPersonas(d.estructura)),
       tarjeta("Respaldos", d.respaldos.length, tabla([
@@ -986,7 +1282,7 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
       ["proceso","Proceso",9], ["estructura","Estructura",10], ["fecha_aprobacion","Fecha de aprobación",13], ["version","Versión",8],
       ["n_oficiales","N.º fuentes oficiales",11], ["n_consumo","N.º fuentes de consumo",11]],
       filas: atributos.map(a => ({...a, ...base(a), nombre_dominio: d.nombre, codigo_atributo: num(a.codigo_atributo),
-        version: num(a.version), n_oficiales: a.fuentes_oficiales.length, n_consumo: a.fuentes_consumo.length}))};
+        version: num(a.version), n_oficiales: nFO(a), n_consumo: nFC(a)}))};
 
     const hOficiales = {nombre:"Fuentes oficiales", columnas: colsBase.concat([
       ["servidor","Servidor",18], ["base_datos","Base de datos",40], ["tabla","Tabla / archivo",28], ["nombre_campo","Campo",24],
@@ -1021,13 +1317,14 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
     const generado = (document.querySelector(".marca small") || {}).textContent || "";
     const hFiltro = {nombre:"Filtro", columnas:[["campo","Dato",28], ["valor","Valor",70,1]], filas:[
       {campo:"Dominio", valor: d.codigo + " · " + d.nombre},
+      esConf(d) ? {campo:"Dominio confidencial", valor: AVISO_CONF + " Las hojas de fuentes van vacías."} : null,
       {campo:"Filtro aplicado", valor: estado.filtroAtributo || "(sin filtro)"},
       {campo:"Atributos exportados", valor: atributos.length + " de " + d.atributos.length},
       {campo:"Fuentes oficiales", valor: hOficiales.filas.length}, {campo:"Fuentes de consumo", valor: hConsumo.filas.length},
       {campo:"Relaciones", valor: REL ? hRelaciones.filas.length : "No disponibles (falta la vista gdd.v_relacion_atributo)"},
       {campo:"Sitio", valor: generado}, {campo:"Descargado", valor: new Date().toLocaleString("es")},
       {campo:"Nota", valor:"Hojas relacionadas por Dominio + Código del atributo. Fuente: gdd.* (registros activos), solo lectura."},
-    ]};
+    ].filter(Boolean)};
     return [hAtributos, hOficiales, hConsumo, hRelaciones, hFiltro];
   }
 
@@ -1071,13 +1368,15 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
     if (!visibles.length) botonExcel.disabled = true;
     const herramientas = el("div", {clase:"herramientas"}, [entrada, botonAbrir, botonExcel,
       el("span", {clase:"nota", texto: visibles.length + " de " + d.atributos.length + " atributos"})]);
+    const avisoConf = esConf(d) ? el("div", {clase:"avisos aviso-conf", texto: AVISO_CONF +
+      " Se muestran los atributos y la cantidad de fuentes de cada uno."}) : null;
 
     const lista = visibles.map(a => {
       const chips = el("div", {clase:"chips"}, [
         a.criticidad ? el("span", {clase:"chip", texto:a.criticidad}) : null,
         a.es_dato_personal === "Sí" ? el("span", {clase:"chip pers", texto:"Dato personal"}) : null,
-        el("span", {clase:"chip of", texto: a.fuentes_oficiales.length + " oficial" + (a.fuentes_oficiales.length === 1 ? "" : "es")}),
-        el("span", {clase:"chip co", texto: a.fuentes_consumo.length + " consumo"}),
+        el("span", {clase:"chip of", texto: nFO(a) + " oficial" + (nFO(a) === 1 ? "" : "es")}),
+        el("span", {clase:"chip co", texto: nFC(a) + " consumo"}),
       ]);
       const resumen = el("summary", null, [
         el("span", {clase:"cod", texto: d.codigo + "-" + a.codigo_atributo}),
@@ -1115,17 +1414,22 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
               ["fecha_aprobacion","Fecha de aprobación"], ["version","Versión"]], a),
           ]),
         ]),
-        el("h4", null, ["Fuentes oficiales ", cuenta(a.fuentes_oficiales.length), botonTodas]),
-        tablaFO,
-        el("h4", null, ["Fuentes de consumo ", cuenta(a.fuentes_consumo.length)]),
-        tabla([["clase","Clase"], ["servidor","Servidor"], ["base_datos","Base de datos / colección"], ["tabla","Tabla"],
-          ["nombre_campo","Campo"], ["fecha_aprobacion","Fecha de aprobación"]],
-          a.fuentes_consumo, "Sin fuentes de consumo activas."),
+        ...(esConf(d) ? [
+          el("h4", null, ["Fuentes oficiales ", cuenta(nFO(a)), " · de consumo ", cuenta(nFC(a))]),
+          el("div", {clase:"avisos aviso-conf", texto: AVISO_CONF}),
+        ] : [
+          el("h4", null, ["Fuentes oficiales ", cuenta(a.fuentes_oficiales.length), botonTodas]),
+          tablaFO,
+          el("h4", null, ["Fuentes de consumo ", cuenta(a.fuentes_consumo.length)]),
+          tabla([["clase","Clase"], ["servidor","Servidor"], ["base_datos","Base de datos / colección"], ["tabla","Tabla"],
+            ["nombre_campo","Campo"], ["fecha_aprobacion","Fecha de aprobación"]],
+            a.fuentes_consumo, "Sin fuentes de consumo activas."),
+        ]),
       ]);
       return el("details", {clase:"atributo"}, [resumen, cuerpo]);
     });
 
-    return [cabeceraDominio(d), herramientas,
+    return [cabeceraDominio(d), avisoConf, herramientas,
       lista.length ? lista : el("div", {clase:"vacio", texto: d.atributos.length ? "Ningún atributo coincide con el filtro." : "El dominio no tiene atributos activos."})];
   }
 
@@ -1146,7 +1450,7 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
     const avisoTerminos = nTerminos ? el("div", {clase:"avisos aviso-red"}, [
       "Los " + nTerminos + " términos de este dominio están en la sección «Glosario de términos». ",
       el("button", {type:"button", clase:"btn-detalle", texto:"Ver términos",
-        onclick: () => { estado.seccion = "terminos"; actualizar(); }}),
+        onclick: () => irA("terminos", estado.dominio)}),
     ]) : null;
     return [cabeceraDominio(d), avisoTerminos,
       tarjeta("Investigación", registros.length,
@@ -1619,7 +1923,26 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
       conVinc.map(x => ({codigo:x.codigo, res:String(x.indicadores.vinculos_resueltos), pen:String(x.indicadores.vinculos_pendientes)})))
       : el("div", {clase:"vacio", texto:"Ningún atributo declara Compartido / Similar."})) : null;
 
-    return [cab, el("div", {clase:"fila-hero"}, [hero, kpis]), tarjetaPuntaje, tarjetaCrit, tarjetaCumple, tarjetaVinc];
+    // responsables por persona: cantidad de dominios a cargo (conteo discreto -> barras, de 1 al maximo)
+    const R = DATOS.resumen.responsables;
+    let tarjetaResp = null;
+    if (R){
+      const filasN = R.por_n_dominios.map(([k, n]) => ({etiqueta: k + (k === 1 ? " dominio" : " dominios"), valor:n, texto:String(n),
+        tip:[[n + " de " + R.personas, "personas a cargo de " + k + (k === 1 ? " dominio" : " dominios")], [pct(n, R.personas), "del total de personas"]]}));
+      tarjetaResp = tarjeta("Responsables por persona", R.personas, [
+        el("div", {clase:"kpis"}, [["Personas", R.personas], ["Asignaciones", R.asignaciones],
+          ["Personas en más de un dominio", R.personas_varios_dominios], ["Personas con más de una asignación", R.personas_varias_asignaciones]]
+          .map(([e, n]) => el("div", {clase:"kpi"}, [el("b", {texto:String(n)}), el("span", {texto:e})]))),
+        notaResponsables(R),
+        el("h4", {clase:"titulo-multiplo", texto:"Personas según la cantidad de dominios a cargo"}),
+        filasN.length ? conTabla(barrasH(filasN, Math.max(1, ...filasN.map(f => f.valor))),
+          [["etiqueta","Dominios a cargo"], ["texto","Personas"]], filasN) : el("div", {clase:"vacio", texto:"Sin responsables con nombre."}),
+        el("h4", {clase:"titulo-multiplo", texto:"Personas con más de una asignación"}),
+        tablaPersonas(R.por_persona.filter(p => p.asignaciones > 1), "Ninguna persona tiene más de una asignación."),
+      ]);
+    }
+
+    return [cab, el("div", {clase:"fila-hero"}, [hero, kpis]), tarjetaPuntaje, tarjetaCrit, tarjetaCumple, tarjetaResp, tarjetaVinc];
   }
 
   function indicadoresDominio(d){
@@ -1651,7 +1974,7 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
       ? el("div", {clase:"tabla-wrap"}, el("table", null, [
           el("thead", null, el("tr", null, ["Atributo","Nombre","Criticidad","Estructura","Resta"].map(c => el("th", {texto:c})))),
           el("tbody", null, i.sin_fuente.map(x => el("tr", {clase:"clic", title:"Ver el atributo",
-            onclick: () => { estado.seccion = "atributos"; estado.filtroAtributo = x.nombre_atributo; actualizar(); }}, [
+            onclick: () => irA("atributos", estado.dominio, x.nombre_atributo)}, [
             el("td", {texto: d.codigo + "-" + x.codigo_atributo}), el("td", {texto:x.nombre_atributo}),
             el("td", {texto:v(x.criticidad)}), el("td", {texto:v(x.estructura)}), el("td", {texto:"−" + x.penalizacion}),
           ])))]))
@@ -1685,7 +2008,8 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
   //     descripcion, primario y fuentes (servidor, base, tabla, campo, formula, valores validos, clase).
   //     Solo se repinta el resultado al filtrar (la barra de filtros conserva foco y desplegables abiertos).
   const COLS_EXP = [   // [clave, encabezado, ancho en Excel, texto largo, visible por defecto]
-    ["dominio","Dominio",10,0,1], ["nombre_dominio","Nombre del dominio",28,0,0], ["codigo","Código",12,0,1],
+    ["dominio","Dominio",10,0,1], ["nombre_dominio","Nombre del dominio",28,0,0],
+    ["estado_vigencia","Estado del dominio",13,0,0], ["codigo","Código",12,0,1],
     ["nombre_atributo","Atributo",30,0,1], ["descripcion_atributo","Descripción",60,1,0], ["criticidad","Criticidad",12,0,1],
     ["tipo_atributo","Tipo de atributo",16,0,0], ["compartido_similar","Compartido / similar",14,0,1],
     ["atributo_primario","Atributo primario",28,0,0], ["dominio_primario","Dominio primario",28,0,0],
@@ -1693,17 +2017,44 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
     ["clasificacion_dato_personal","Clasificación dato personal",22,0,0], ["reporte","Reporte",9,0,0], ["proyecto","Proyecto",9,0,0],
     ["proceso","Proceso",9,0,0], ["estructura","Estructura",10,0,0], ["fecha_aprobacion","Fecha de aprobación",13,0,0],
     ["version","Versión",8,0,0], ["tiene_fo","Con fuente oficial",11,0,1], ["n_oficiales","N.º fuentes oficiales",10,0,1],
-    ["fuente_primaria","Fuente primaria",50,1,0], ["fuentes_oficiales","Fuentes oficiales",60,1,0],
+    ["fuente_primaria","Fuente primaria",50,1,0],
+    // fuentes separadas por campo (pedido 2026-11-11): con varias fuentes, valores unidos por " | " en el mismo orden
+    ["fo_servidor","Servidor (f. oficial)",20,1,0], ["fo_base_datos","Base de datos (f. oficial)",36,1,0],
+    ["fo_tabla","Tabla (f. oficial)",28,1,0], ["fo_campo","Campo (f. oficial)",26,1,0],
     ["tiene_consumo","Con fuente de consumo",11,0,0], ["n_consumo","N.º fuentes de consumo",10,0,1],
-    ["fuentes_consumo","Fuentes de consumo",60,1,0], ["resta","Resta al puntaje",9,0,0],
+    ["fc_clase","Clase (f. consumo)",14,1,0], ["fc_servidor","Servidor (f. consumo)",20,1,0],
+    ["fc_base_datos","Base de datos (f. consumo)",32,1,0], ["fc_tabla","Tabla (f. consumo)",28,1,0],
+    ["fc_campo","Campo (f. consumo)",26,1,0], ["resta","Resta al puntaje",9,0,0],
   ];
+  const OCULTO_CONF = "(confidencial)";
   const NUMERICAS_EXP = new Set(["n_oficiales", "n_consumo", "resta"]);
   const CLAVE_COLS = "gdd_sitio_explorador_columnas";
   const EXP = {sel:{}, texto:"", orden:{campo:"codigo", asc:true}, pagina:0, porPagina:100, columnas:null};
   let FILAS_EXP = null;
+  // Sitio de varias paginas: al ir a un atributo y volver, el Explorador recupera sus
+  // filtros (sessionStorage: solo esta pestana; si no esta disponible, se empieza de cero).
+  const CLAVE_EXP = "gdd_sitio_explorador_estado";
+  function guardarEstadoExp(){
+    if (!MULTI) return;
+    try {
+      sessionStorage.setItem(CLAVE_EXP, JSON.stringify({texto:EXP.texto, orden:EXP.orden, pagina:EXP.pagina,
+        sel:Object.fromEntries(Object.entries(EXP.sel).map(([k, s]) => [k, [...s]]))}));
+    } catch (e) { /* almacenamiento no disponible */ }
+  }
+  (function leerEstadoExp(){
+    if (!MULTI) return;
+    try {
+      const g = JSON.parse(sessionStorage.getItem(CLAVE_EXP) || "null");
+      if (!g) return;
+      for (const [k, valores] of Object.entries(g.sel || {})) if (Array.isArray(valores)) EXP.sel[k] = new Set(valores);
+      EXP.texto = typeof g.texto === "string" ? g.texto : "";
+      if (g.orden && typeof g.orden.campo === "string") EXP.orden = {campo:g.orden.campo, asc:!!g.orden.asc};
+      EXP.pagina = Number.isInteger(g.pagina) ? g.pagina : 0;
+    } catch (e) { /* almacenamiento no disponible o dato invalido */ }
+  })();
 
   function restaAtributo(a){
-    if (a.fuentes_oficiales.length) return 0;
+    if (nFO(a)) return 0;
     const critico = sinTildes(a.criticidad).trim().toLowerCase() === "critico";
     return critico ? (a.estructura === "Sí" ? IND.penalizacion.critico_estructura : IND.penalizacion.critico) : IND.penalizacion.otro;
   }
@@ -1714,16 +2065,25 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
     return DATOS.dominios.flatMap(d => d.atributos.map(a => {
       const fo = a.fuentes_oficiales, fc = a.fuentes_consumo, codigo = d.codigo + "-" + a.codigo_atributo;
       const prim = fo.find(f => f.es_fuente_primaria === "Sí") || fo[0];
+      const conf = esConf(d), n_fo = nFO(a), n_fc = nFC(a);
+      // dominio confidencial: el detalle no viene en los datos; se marca para no confundirlo con "sin fuente"
+      const unir = (lista, n, campo) => conf ? (n ? OCULTO_CONF : "") : lista.map(f => f[campo] || "—").join(" | ");
       const fila = {
-        dominio:d.codigo, nombre_dominio:d.nombre, codigo, codigo_atributo:a.codigo_atributo, nombre_atributo:a.nombre_atributo,
+        dominio:d.codigo, nombre_dominio:d.nombre, estado_vigencia: d.estado_vigencia || "Activo",
+        codigo, codigo_atributo:a.codigo_atributo, nombre_atributo:a.nombre_atributo,
         descripcion_atributo:a.descripcion_atributo, criticidad:a.criticidad, tipo_atributo:a.tipo_atributo,
         compartido_similar:a.compartido_similar, atributo_primario:a.atributo_primario, dominio_primario:a.dominio_primario,
         estado_vinculo: estadoVinc.get(codigo) || "", es_dato_personal:a.es_dato_personal,
         clasificacion_dato_personal:a.clasificacion_dato_personal, reporte:a.reporte, proyecto:a.proyecto, proceso:a.proceso,
         estructura:a.estructura, fecha_aprobacion:a.fecha_aprobacion, version:a.version,
-        tiene_fo: fo.length ? "Sí" : "No", n_oficiales: fo.length, fuente_primaria: prim ? ruta(prim) : "",
-        fuentes_oficiales: fo.map(ruta).join(" | "), tiene_consumo: fc.length ? "Sí" : "No", n_consumo: fc.length,
-        fuentes_consumo: fc.map(f => (f.clase ? f.clase + ": " : "") + ruta(f)).join(" | "), resta: restaAtributo(a), _a:a, _d:d,
+        tiene_fo: n_fo ? "Sí" : "No", n_oficiales: n_fo,
+        fuente_primaria: conf ? (n_fo ? OCULTO_CONF : "") : (prim ? ruta(prim) : ""),
+        fo_servidor: unir(fo, n_fo, "servidor"), fo_base_datos: unir(fo, n_fo, "base_datos"),
+        fo_tabla: unir(fo, n_fo, "tabla"), fo_campo: unir(fo, n_fo, "nombre_campo"),
+        tiene_consumo: n_fc ? "Sí" : "No", n_consumo: n_fc,
+        fc_clase: unir(fc, n_fc, "clase"), fc_servidor: unir(fc, n_fc, "servidor"), fc_base_datos: unir(fc, n_fc, "base_datos"),
+        fc_tabla: unir(fc, n_fc, "tabla"), fc_campo: unir(fc, n_fc, "nombre_campo"),
+        resta: restaAtributo(a), _a:a, _d:d,
       };
       fila._buscar = sinTildes([codigo, a.nombre_atributo, a.descripcion_atributo, a.atributo_primario, a.dominio_primario,
         a.tipo_atributo, a.clasificacion_dato_personal,
@@ -1737,7 +2097,8 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
     const vacio = {compartido_similar:"(ninguno)", estado_vinculo:"(sin relación)"};
     const etiquetas = {tiene_fo:{"Sí":"Con fuente oficial", "No":"Sin fuente oficial"},
                        tiene_consumo:{"Sí":"Con fuente de consumo", "No":"Sin fuente de consumo"}};
-    const defs = [["dominio","Dominio"], ["criticidad","Criticidad"], ["compartido_similar","Compartido / similar"],
+    const defs = [["dominio","Dominio"], DATOS.resumen.n_confidenciales ? ["estado_vigencia","Estado del dominio"] : null,
+      ["criticidad","Criticidad"], ["compartido_similar","Compartido / similar"],
       REL ? ["estado_vinculo","Estado del vínculo"] : null, ["tipo_atributo","Tipo de atributo"], ["es_dato_personal","Dato personal"],
       ["tiene_fo","Fuente oficial"], ["tiene_consumo","Fuente de consumo"], ["estructura","Estructura"], ["reporte","Reporte"],
       ["proyecto","Proyecto"], ["proceso","Proceso"]].filter(Boolean);
@@ -1749,6 +2110,7 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
           : (etiquetas[campo] || {})[valor] || valor || vacio[campo] || "(vacío)"}))
         .sort((a, b) => a.etiqueta.localeCompare(b.etiqueta, "es", {numeric:true}));
       if (!EXP.sel[campo]) EXP.sel[campo] = new Set();
+      for (const valor of [...EXP.sel[campo]]) if (!n.has(valor)) EXP.sel[campo].delete(valor);  // filtros recuperados que ya no existen
       return {campo, titulo, opciones};
     });
   }
@@ -1878,11 +2240,11 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
     })));
     const tbody = el("tbody", null, pagina.map(f => el("tr", null, cols.map(([k, , , largo]) => {
       if (k === "codigo") return el("td", null, el("button", {type:"button", clase:"enlace-atributo", texto:f.codigo,
-        title:"Ver el atributo en «Atributos y fuentes»", onclick: () => {
-          estado.dominio = f.dominio; estado.seccion = "atributos"; estado.filtroAtributo = f.nombre_atributo; actualizar(); }}));
+        title:"Ver el atributo en «Atributos y fuentes»", onclick: () => irA("atributos", f.dominio, f.nombre_atributo)}));
       return el("td", {clase: largo ? "largo" : null, texto: v(f[k] === 0 ? "0" : f[k])});
     }))));
     cont.replaceChildren(nav, el("div", {clase:"tabla-wrap exp-tabla"}, el("table", null, [thead, tbody])));
+    guardarEstadoExp();
   }
 
   function bajarArchivo(blob, nombre){
@@ -1918,6 +2280,8 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
       {campo:"Texto buscado", valor: EXP.texto || "(sin texto)"}, ...aplicados,
       {campo:"Atributos", valor: filas.length + " de " + FILAS_EXP.length},
       {campo:"Fuentes oficiales", valor: hojas[1].filas.length}, {campo:"Fuentes de consumo", valor: hojas[2].filas.length},
+      ...(filas.some(f => esConf(f._d)) ? [{campo:"Dominios confidenciales", valor: filas.filter(f => esConf(f._d)).length +
+        " atributo(s) de dominios confidenciales: " + AVISO_CONF + " No están en las hojas de fuentes."}] : []),
       {campo:"Columnas de «Resultado»", valor: cols.map(c => c[1]).join(", ")},
       {campo:"Sitio", valor: generado}, {campo:"Descargado", valor: new Date().toLocaleString("es")},
     ]});
@@ -1949,14 +2313,16 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
   }
 
   function guardarHash(){
-    const h = "#" + estado.seccion + (estado.dominio ? "/" + encodeURIComponent(estado.dominio) : "");
+    const h = hashDe(estado.seccion, estado.dominio);
     if (location.hash !== h) history.replaceState(null, "", h);
   }
   function leerHash(){
-    const [s, dom] = location.hash.replace(/^#/, "").split("/");
-    if (SECCIONES.some(x => x.id === s)) estado.seccion = s;
+    const [s, dom, filtro] = location.hash.replace(/^#/, "").split("/");
+    // En el sitio de varias paginas la seccion la fija la pagina.
+    if (!MULTI && SECCIONES.some(x => x.id === s)) estado.seccion = s;
     const cod = dom ? decodeURIComponent(dom) : null;
     estado.dominio = cod && porCodigo.has(cod) ? cod : null;
+    if (filtro) estado.filtroAtributo = decodeURIComponent(filtro);
   }
   function actualizar(){
     pintarSecciones(); pintarListaDominios(); pintarContenido(); guardarHash(); window.scrollTo(0, 0);

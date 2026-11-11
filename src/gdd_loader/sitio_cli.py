@@ -1,6 +1,6 @@
 """
-Genera el sitio de consulta por dominio como un archivo HTML autocontenido
-(sin internet ni servidor). SOLO LECTURA: no escribe en la base.
+Genera el sitio de consulta por dominio (sin internet ni servidor). SOLO LECTURA:
+no escribe en la base.
 
 Secciones del menu lateral, por dominio:
   1. Dominio y estructura (datos del dominio, responsables y respaldos)
@@ -11,9 +11,19 @@ Secciones del menu lateral, por dominio:
   6. Relaciones entre dominios (grafo de atributos Compartido / Similar)
   7. Indicadores (puntaje de fuente oficial y cumplimiento por dominio)
 
+Salida (v0.13.0):
+  - --salida <carpeta> (por defecto): crea <carpeta>\\sitio_dominios_AAAAMMDD_HHMM\\ con
+    index.html (seccion 1) y una pagina por seccion (atributos.html, explorador.html,
+    investigacion.html, terminos.html, relaciones.html, indicadores.html). Mismo
+    diseno; el menu lateral enlaza las paginas. Se publica la carpeta completa
+    (por ejemplo en una biblioteca de SharePoint) y se abre index.html.
+  - --salida <archivo>.html: un solo HTML con todas las secciones (como v0.12.0).
+  Los datos van comprimidos dentro de cada pagina. Si alguna pagina supera --max-mb
+  (por defecto 10, el limite por archivo de SharePoint), se registra una advertencia.
+
 Uso:
 
-    python -m gdd_loader.sitio_cli                          # HTML en la carpeta actual
+    python -m gdd_loader.sitio_cli                          # carpeta del sitio en la carpeta actual
     python -m gdd_loader.sitio_cli --salida "C:\\ruta\\carpeta"
     python -m gdd_loader.sitio_cli --salida sitio.html --titulo "Glosario PRODUCCION"
 
@@ -23,7 +33,7 @@ vista no existe, el sitio se genera igual y la seccion 6 lo informa. No usa stag
 El HTML contiene valores reales (incluidos nombres de responsables): entregarlo
 solo al equipo de gobierno de datos.
 
-Codigo de salida: 0 si genero el archivo, 1 si fallo.
+Codigo de salida: 0 si genero el sitio, 1 si fallo.
 """
 
 from __future__ import annotations
@@ -35,33 +45,54 @@ from pathlib import Path
 
 from gdd_loader.config import cargar_settings
 from gdd_loader.exportar.grafo_relaciones import construir_modelo as construir_modelo_grafo
-from gdd_loader.exportar.sitio_dominios import construir_modelo, generar_html
+from gdd_loader.exportar.sitio_dominios import (codigos_inactivos, construir_modelo, describir_estado_inactivo,
+                                                filtrar_relaciones_vigencia, generar_html, generar_sitio)
 from gdd_loader.load.db import construir_engine
 from gdd_loader.load.grafo_repository import VistaNoExisteError, leer_dominios, leer_relaciones
-from gdd_loader.load.sitio_repository import leer_todo
+from gdd_loader.load.sitio_repository import FaltaEstadoVigenciaError, leer_todo
 from gdd_loader.logging_setup import configurar_logging
 
 
 def _construir_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Sitio HTML de consulta por dominio (solo lectura)")
     parser.add_argument("--salida", default=".",
-                        help="Carpeta destino o ruta .html. Por defecto, la carpeta actual.")
+                        help="Carpeta donde se crea el sitio de varias paginas, o ruta .html para un solo "
+                             "archivo. Por defecto, la carpeta actual.")
     parser.add_argument("--titulo", default="Glosario de datos por dominio", help="Titulo de la pagina")
+    parser.add_argument("--max-mb", type=float, default=10.0,
+                        help="Advertir si una pagina supera este tamano en MB (por defecto 10)")
     parser.add_argument("--env-file", default=None, help="Ruta a un .env especifico (opcional)")
     return parser
 
 
 def resolver_ruta_salida(salida: str, ahora: datetime.datetime) -> Path:
+    """Ruta .html (un solo archivo) o carpeta nueva del sitio de varias paginas."""
     ruta = Path(salida)
     if ruta.suffix.lower() == ".html":
         return ruta
-    return ruta / f"sitio_dominios_{ahora:%Y%m%d_%H%M}.html"
+    return ruta / f"sitio_dominios_{ahora:%Y%m%d_%H%M}"
 
 
-def leer_relaciones_o_none(conn, logger) -> dict | None:
-    """Modelo del grafo (seccion 6) o None si falta la vista gdd.v_relacion_atributo."""
+def paginas_excedidas(paginas: dict[str, str], max_mb: float) -> list[tuple[str, float]]:
+    """[(archivo, MB)] de las paginas que superan max_mb (tamano en UTF-8)."""
+    tamanos = {nombre: len(html.encode("utf-8")) / 1_000_000 for nombre, html in paginas.items()}
+    return [(nombre, mb) for nombre, mb in tamanos.items() if mb > max_mb]
+
+
+def escribir_sitio(destino: Path, paginas: dict[str, str]) -> None:
+    """Escribe las paginas en una carpeta nueva; no sobrescribe un sitio anterior."""
+    destino.mkdir(parents=True, exist_ok=False)
+    for nombre, html in paginas.items():
+        (destino / nombre).write_text(html, encoding="utf-8")
+
+
+def leer_relaciones_o_none(conn, logger, inactivos: set[str] | None = None) -> dict | None:
+    """Modelo del grafo (seccion 6) o None si falta la vista gdd.v_relacion_atributo.
+    Los dominios Inactivos no aparecen en el grafo (ver filtrar_relaciones_vigencia)."""
     try:
-        return construir_modelo_grafo(leer_dominios(conn), leer_relaciones(conn))
+        dominios, relaciones = filtrar_relaciones_vigencia(leer_dominios(conn), leer_relaciones(conn),
+                                                           inactivos or set())
+        return describir_estado_inactivo(construir_modelo_grafo(dominios, relaciones))
     except VistaNoExisteError as exc:
         logger.warning("%s La seccion 'Relaciones entre dominios' queda sin grafo.", exc)
         return None
@@ -80,10 +111,20 @@ def main() -> int:
     ahora = datetime.datetime.now()
     engine = construir_engine(settings)
     with engine.connect() as conn:
-        datos = leer_todo(conn)
-        relaciones = leer_relaciones_o_none(conn, logger)  # al final: si falla, no afecta lo anterior
+        try:
+            datos = leer_todo(conn)
+        except FaltaEstadoVigenciaError as exc:
+            logger.error("%s No se genera el sitio: sin el estado no se sabe que dominios no publicar.", exc)
+            return 1
+        # al final: si falla, no afecta lo anterior
+        relaciones = leer_relaciones_o_none(conn, logger, codigos_inactivos(datos["dominios"]))
 
     modelo = construir_modelo(datos, relaciones)
+    r = modelo["resumen"]
+    logger.info("Estado de vigencia: %d dominio(s) Inactivo(s) excluidos del sitio; %d Confidencial(es) "
+                "publicados sin fuentes oficiales ni de consumo", r["n_inactivos"], r["n_confidenciales"])
+    for entidad, n in r["excluidos_inactivos"].items():
+        logger.info("  %d registros de %s de dominios Inactivos no se publican", n, entidad)
     if relaciones is not None:
         rr = relaciones["resumen"]
         logger.info("Relaciones: %d de %d dominios relacionados, %d aristas, %d de %d atributos relacionados en el grafo",
@@ -100,10 +141,26 @@ def main() -> int:
     for entidad, n in r["huerfanos"].items():
         logger.warning("  %d registros activos de %s sin dominio/atributo valido (no se muestran)", n, entidad)
 
+    generado = f"{ahora:%Y-%m-%d %H:%M}"
     ruta = resolver_ruta_salida(args.salida, ahora)
-    ruta.parent.mkdir(parents=True, exist_ok=True)
-    ruta.write_text(generar_html(modelo, f"{ahora:%Y-%m-%d %H:%M}", args.titulo), encoding="utf-8")
-    logger.info("Archivo generado: %s", ruta.resolve())
+    if ruta.suffix.lower() == ".html":
+        paginas = {ruta.name: generar_html(modelo, generado, args.titulo)}
+        ruta.parent.mkdir(parents=True, exist_ok=True)
+        ruta.write_text(paginas[ruta.name], encoding="utf-8")
+        logger.info("Archivo generado: %s (%.2f MB)", ruta.resolve(), len(paginas[ruta.name].encode("utf-8")) / 1e6)
+    else:
+        paginas = generar_sitio(modelo, generado, args.titulo)
+        try:
+            escribir_sitio(ruta, paginas)
+        except FileExistsError:
+            logger.error("La carpeta %s ya existe; no se sobrescribe. Vuelva a intentarlo en un minuto "
+                         "o indique otra --salida.", ruta.resolve())
+            return 1
+        for nombre, html in paginas.items():
+            logger.info("  %-20s %.2f MB", nombre, len(html.encode("utf-8")) / 1e6)
+        logger.info("Sitio generado (%d paginas): %s  -> abrir index.html", len(paginas), ruta.resolve())
+    for nombre, mb in paginas_excedidas(paginas, args.max_mb):
+        logger.warning("La pagina %s pesa %.2f MB: supera el limite de %.0f MB.", nombre, mb, args.max_mb)
     return 0
 
 
