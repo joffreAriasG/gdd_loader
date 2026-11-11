@@ -284,8 +284,12 @@ HTML autocontenido (sin internet ni servidor) con menú lateral y siete seccione
 3. **Explorador de atributos** (v0.12.0): atributos de todos los dominios con filtros combinables (uno o más
    dominios, criticidad, compartido/similar, estado del vínculo, tipo, dato personal, con/sin fuente oficial y
    de consumo, estructura/reporte/proyecto/proceso), búsqueda de texto (incluye tablas, campos y fórmulas),
-   selector de columnas, orden por columna y descarga a Excel del resultado con sus fuentes.
-4. **Investigación**: registros de la hoja Investigación, agrupados por clasificación (sin los términos).
+   selector de columnas, orden por columna y descarga a Excel del resultado con sus fuentes. Desde v0.13.1,
+   una columna por rol (`cat_rol`) con los responsables del dominio (una fila por atributo; varias personas
+   del mismo rol en la misma celda) y búsqueda también por responsable.
+4. **Investigación**: registros de la hoja Investigación (sin los términos) en tarjetas, agrupados en todas las
+   secciones del catálogo `cat_clasificacion_investigacion` (incluida "Actualización de datos"; las vacías dicen
+   "Sin registros"), con buscador y accesos directos a cada sección (v0.13.1).
 5. **Glosario de términos**: los registros con clasificación "Término" de todos los dominios en una sola
    página (o los del dominio elegido), con buscador e índice A–Z.
 6. **Relaciones entre dominios**: grafo de los atributos Compartido / Similar (completo, o el dominio

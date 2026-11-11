@@ -345,9 +345,9 @@ def test_leer_todo_ejecuta_una_consulta_por_entidad():
     columna.scalar.return_value = 8                     # COL_LENGTH de id_estado_vigencia: existe
     conn.execute.side_effect = lambda sql: columna if sql is sitio_repository.SQL_TIENE_ESTADO_VIGENCIA else [fila]
     datos = sitio_repository.leer_todo(conn)
-    assert set(datos) == {"dominios", "roles", "responsables", "respaldos", "atributos",
+    assert set(datos) == {"dominios", "roles", "clasificaciones", "responsables", "respaldos", "atributos",
                           "fuentes_oficiales", "fuentes_consumo", "investigacion"}
-    assert conn.execute.call_count == 9                 # comprobacion de la columna + 8 entidades
+    assert conn.execute.call_count == 10                # comprobacion de la columna + 9 entidades
     assert datos["dominios"] == [{"codigo_dominio": "ADS"}]
     assert "estado_vigencia" in str(sitio_repository.SQL_DOMINIOS)
 
@@ -497,6 +497,39 @@ def test_explorador_fuentes_en_columnas_separadas_y_estado_del_dominio():
         assert col in html
     assert '["fuentes_oficiales","Fuentes oficiales",60' not in html and '["fuentes_consumo","Fuentes de consumo",60' not in html
     assert 'const OCULTO_CONF = "(confidencial)"' in html and "function etqConf" not in html and "const etqConf" in html
+
+
+# --- v0.13.1: responsables por rol en el Explorador e Investigacion por secciones del catalogo ---
+
+_CLASIFICACIONES = [{"id": 6, "nombre_clasificacion": "Actualización de datos"}, {"id": 1, "nombre_clasificacion": "Normativas e instructivos"},
+                    {"id": 5, "nombre_clasificacion": "Término"}, {"id": 2, "nombre_clasificacion": "Procesos relacionados"}]
+_ROLES = [{"id": 3, "nombre_rol": "Dueño de Dominio"}, {"id": 1, "nombre_rol": "Data Steward Implementación"}]
+
+
+def test_resumen_trae_secciones_de_investigacion_y_roles_del_catalogo():
+    m = construir_modelo(_datos(clasificaciones=_CLASIFICACIONES, roles=_ROLES))
+    r = m["resumen"]
+    # orden del catalogo (id), sin Termino; "Actualización de datos" aunque no tenga registros
+    assert r["secciones_investigacion"] == ["Normativas e instructivos", "Procesos relacionados", "Actualización de datos"]
+    assert r["roles"] == [{"id": 1, "nombre": "Data Steward Implementación"}, {"id": 3, "nombre": "Dueño de Dominio"}]
+    assert construir_modelo(_datos())["resumen"]["secciones_investigacion"] == []      # sin catalogo: no falla
+
+
+def test_explorador_lleva_la_estructura_para_las_columnas_de_responsables():
+    modelo = construir_modelo(_datos(roles=_ROLES))
+    exp = _modelo_del_html(generar_sitio(modelo, "x")["explorador.html"])
+    ads = next(d for d in exp["dominios"] if d["codigo"] == "ADS")
+    assert [r["nombre_responsable"] for r in ads["estructura"]] == ["Persona A"]
+    html = generar_html(modelo, "x")
+    assert "function responsablesPorRol" in html and 'clave:"resp_" + r.id' in html
+    assert "...Object.values(resp)" in html                      # la busqueda de texto incluye a los responsables
+
+
+def test_investigacion_en_tarjetas_con_todas_las_secciones():
+    html = generar_html(construir_modelo(_datos(clasificaciones=_CLASIFICACIONES)), "x")
+    assert "DATOS.resumen.secciones_investigacion" in html and 'texto: g.total ? "Ningún registro' in html
+    assert 'el("article", {clase:"termino"}' in html and "indice-secciones" in html
+    assert "filtroInvestigacion" in html
 
 
 # --- sitio de varias paginas (v0.13.0) ---

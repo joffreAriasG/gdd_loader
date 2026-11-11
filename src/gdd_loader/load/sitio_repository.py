@@ -108,9 +108,14 @@ SQL_INVESTIGACION = text("""
 # Catalogo de roles (indicador "estructura completa": roles requeridos por id, ver sitio_dominios).
 SQL_ROLES = text("SELECT id, nombre_rol FROM gdd.cat_rol")
 
+# Catalogo de clasificaciones de investigacion: la seccion Investigacion muestra TODAS (sin Termino),
+# en el orden del catalogo, aunque no tengan registros (p. ej. "Actualización de datos").
+SQL_CLASIFICACIONES = text("SELECT id, nombre_clasificacion FROM gdd.cat_clasificacion_investigacion")
+
 CONSULTAS = {
     "dominios": SQL_DOMINIOS,
     "roles": SQL_ROLES,
+    "clasificaciones": SQL_CLASIFICACIONES,
     "responsables": SQL_RESPONSABLES,
     "respaldos": SQL_RESPALDOS,
     "atributos": SQL_ATRIBUTOS,

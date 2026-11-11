@@ -418,6 +418,14 @@ def construir_modelo(datos: dict[str, list[dict]], relaciones: dict | None = Non
             nombres_rol[int(r["id"])] = a_texto(r.get("nombre_rol"))
         except (TypeError, ValueError, KeyError):
             pass
+    # Secciones de Investigacion: el catalogo completo en orden de id, sin "Término" (va al Glosario).
+    clasificaciones = []
+    for c in datos.get("clasificaciones", []):
+        try:
+            clasificaciones.append((int(c["id"]), a_texto(c.get("nombre_clasificacion"))))
+        except (TypeError, ValueError, KeyError):
+            pass
+    secciones_investigacion = [n for _, n in sorted(clasificaciones) if n and not es_termino(n)]
     evaluados = [d["indicadores"] for d in lista if d["indicadores"]["puntaje"] is not None]
     return {
         "dominios": lista,
@@ -431,6 +439,9 @@ def construir_modelo(datos: dict[str, list[dict]], relaciones: dict | None = Non
             "totales": totales,
             "huerfanos": huerfanos,
             "responsables": agrupar_responsables(lista),
+            # todos los roles de cat_rol (columnas de responsables del Explorador)
+            "roles": [{"id": i, "nombre": n} for i, n in sorted(nombres_rol.items())],
+            "secciones_investigacion": secciones_investigacion,
             "indicadores": {
                 "penalizacion": PENALIZACION,
                 "roles_requeridos": [{"id": i, "nombre": nombres_rol.get(i, f"Rol {i}")} for i in ROLES_REQUERIDOS],
@@ -485,7 +496,7 @@ _CLAVES_SIEMPRE = frozenset({"codigo", "nombre", "estado_vigencia", "info", "con
 _CLAVES_POR_SECCION = {
     "estructura": ({"estructura", "respaldos"}, False),
     "atributos": ({"atributos"}, True),
-    "explorador": ({"atributos"}, True),
+    "explorador": ({"atributos", "estructura"}, True),   # estructura: columnas de responsables por rol
     "investigacion": ({"investigacion"}, False),
     "terminos": ({"investigacion"}, False),
     "relaciones": (set(), True),
@@ -766,6 +777,9 @@ th.ordenable:hover{background:var(--marino-3)}
 .termino h4{margin:0;font-size:15px;color:var(--acento)}
 .termino p{margin:0;white-space:pre-wrap;word-break:break-word;line-height:1.55}
 .termino-ref{margin-top:8px;color:var(--muted);font-size:12.5px;word-break:break-word}
+.titulo-seccion-inv{margin:0;font-size:16px;color:var(--acento)}
+.seccion-inv{scroll-margin-top:12px}
+.indice-secciones button{font-weight:600}
 .chip-dominio{flex:none;background:var(--marino);color:#fff;border:0;border-radius:999px;padding:2px 9px;font:inherit;
   font-size:12px;font-weight:700;cursor:pointer}
 .chip-dominio:hover{background:var(--marino-3)}
@@ -903,7 +917,7 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
   ];
   const porCodigo = new Map(DATOS.dominios.map(d => [d.codigo, d]));
   const estado = {seccion: MULTI ? CONFIG.seccion : "estructura", dominio:null, filtroDominio:"", filtroAtributo:"",
-                  tiposRel:null, aislados:false, estadoRel:"", filtroTermino:"", letraTermino:""};
+                  tiposRel:null, aislados:false, estadoRel:"", filtroTermino:"", letraTermino:"", filtroInvestigacion:""};
   if (MULTI) document.title = document.title + " · " + SECCIONES.find(s => s.id === CONFIG.seccion).titulo;
 
   // #seccion/DOMINIO[/filtro de atributo]
@@ -988,14 +1002,14 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
     const ul = document.getElementById("listaDominios");
     const items = [el("li", null, el("button", {
       clase: estado.dominio === null ? "activo" : "",
-      onclick: () => { estado.dominio = null; estado.letraTermino = ""; estado.filtroTermino = ""; actualizar(); }
+      onclick: () => { estado.dominio = null; estado.letraTermino = ""; estado.filtroTermino = ""; estado.filtroInvestigacion = ""; actualizar(); }
     }, [el("span", {clase:"cod", texto:"Todos"}), el("span", {clase:"nom", texto:"Resumen de dominios"})]))];
     for (const d of DATOS.dominios){
       if (f && !(d.codigo.toLowerCase().includes(f) || (d.nombre || "").toLowerCase().includes(f))) continue;
       items.push(el("li", null, el("button", {
         clase: d.codigo === estado.dominio ? "activo" : "", title: d.nombre,
         onclick: () => { estado.dominio = d.codigo; estado.filtroAtributo = ""; estado.letraTermino = "";
-                         estado.filtroTermino = ""; actualizar(); }
+                         estado.filtroTermino = ""; estado.filtroInvestigacion = ""; actualizar(); }
       }, [el("span", {clase:"cod", texto:d.codigo}), el("span", {clase:"nom"}, [etqConf(d), d.nombre])])));
     }
     ul.replaceChildren(...items);
@@ -1434,27 +1448,63 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
   }
 
   // --- seccion 3 (sin los terminos: van en la seccion "Glosario de términos")
+  //     Tarjetas por registro (como el Glosario), agrupadas por seccion. Se muestran TODAS las secciones del
+  //     catalogo (cat_clasificacion_investigacion sin "Término"), en su orden, aunque esten vacias
+  //     ("Actualización de datos" incluida); una clasificacion fuera del catalogo va al final.
+  function enlaceOTexto(t){
+    return /^https?:\/\/\S+$/i.test((t || "").trim())
+      ? el("a", {href:t.trim(), target:"_blank", rel:"noopener noreferrer", texto:t.trim()}) : t;
+  }
   function vistaInvestigacion(d){
-    const grupos = new Map();
-    const registros = d.investigacion.filter(r => !esTermino(r));
+    const registros = d.investigacion.filter(r => !esTermino(r))
+      .sort((a, b) => (a.nombre || "").localeCompare(b.nombre || "", "es", {sensitivity:"base"}));
     const nTerminos = d.investigacion.length - registros.length;
+    const norm = s => sinTildes(s).trim().toLowerCase();
+    const secciones = (DATOS.resumen.secciones_investigacion || []).slice();
     for (const r of registros){
       const k = r.clasificacion || "Sin clasificación";
-      if (!grupos.has(k)) grupos.set(k, []);
-      grupos.get(k).push(r);
+      if (!secciones.some(s => norm(s) === norm(k))) secciones.push(k);
     }
-    const bloques = [...grupos.entries()].map(([k, filas]) => el("div", {clase:"grupo"}, [
-      el("h3", null, [k, cuenta(filas.length)]),
-      tabla([["nombre","Nombre"], ["descripcion","Descripción","largo"], ["referencia_normativa","Referencia normativa","largo"]], filas),
-    ]));
+    const f = sinTildes(estado.filtroInvestigacion).toLowerCase();
+    const visibles = registros.filter(r => !f || [r.nombre, r.descripcion, r.referencia_normativa]
+      .some(t => sinTildes(t).toLowerCase().includes(f)));
+    const grupos = secciones.map((s, i) => ({titulo:s, ancla:"inv-sec-" + i,
+      total: registros.filter(r => norm(r.clasificacion || "Sin clasificación") === norm(s)).length,
+      filas: visibles.filter(r => norm(r.clasificacion || "Sin clasificación") === norm(s))}));
+
+    const entrada = el("input", {type:"search", placeholder:"Buscar nombre, descripción o referencia", value: estado.filtroInvestigacion});
+    entrada.addEventListener("input", e => {
+      estado.filtroInvestigacion = e.target.value;
+      const pos = e.target.selectionStart;
+      pintarContenido();
+      const nuevo = document.querySelector(".herramientas input");
+      if (nuevo){ nuevo.focus(); nuevo.setSelectionRange(pos, pos); }
+    });
+    const herramientas = el("div", {clase:"herramientas"}, [entrada,
+      el("span", {clase:"nota", texto: visibles.length + " de " + registros.length + " registros"})]);
+    // accesos directos a cada seccion (con su cantidad)
+    const indice = el("div", {clase:"indice-letras indice-secciones"}, grupos.map(g => el("button", {type:"button",
+      texto: g.titulo + " (" + g.filas.length + ")", onclick: () => {
+        const destino = document.getElementById(g.ancla);
+        if (destino) destino.scrollIntoView({behavior:"smooth", block:"start"});
+      }})));
+
     const avisoTerminos = nTerminos ? el("div", {clase:"avisos aviso-red"}, [
       "Los " + nTerminos + " términos de este dominio están en la sección «Glosario de términos». ",
       el("button", {type:"button", clase:"btn-detalle", texto:"Ver términos",
         onclick: () => irA("terminos", estado.dominio)}),
     ]) : null;
-    return [cabeceraDominio(d), avisoTerminos,
-      tarjeta("Investigación", registros.length,
-        bloques.length ? el("div", null, bloques) : el("div", {clase:"vacio", texto:"Sin registros de investigación activos."}))];
+    const lista = grupos.map(g => el("section", {clase:"letra seccion-inv", id:g.ancla}, [
+      el("div", {clase:"letra-cab"}, [el("h3", {clase:"titulo-seccion-inv", texto:g.titulo}), cuenta(g.filas.length)]),
+      g.filas.length ? el("div", {clase:"terminos"}, g.filas.map(r => el("article", {clase:"termino"}, [
+        el("div", {clase:"termino-cab"}, [el("h4", {texto: r.nombre || "(sin nombre)"})]),
+        el("p", {texto: v(r.descripcion)}),
+        r.referencia_normativa ? el("div", {clase:"termino-ref"},
+          [el("b", {texto:"Referencia normativa: "}), enlaceOTexto(r.referencia_normativa)]) : null,
+      ])))
+      : el("div", {clase:"vacio", texto: g.total ? "Ningún registro de esta sección coincide con la búsqueda." : "Sin registros."}),
+    ]));
+    return [cabeceraDominio(d), avisoTerminos, herramientas, indice, lista];
   }
 
   // --- seccion 4: glosario de terminos (registros de investigacion con clasificacion "Término")
@@ -2027,6 +2077,24 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
     ["fc_campo","Campo (f. consumo)",26,1,0], ["resta","Resta al puntaje",9,0,0],
   ];
   const OCULTO_CONF = "(confidencial)";
+  // Responsables del dominio en pivote (pedido 2026-11-11): una columna por rol de cat_rol (+ "Otro rol" si hay
+  // filas con un rol fuera del catalogo). Cada fila sigue siendo un atributo; varias personas con el mismo rol
+  // en el dominio van en la misma celda, unidas por " | ". Ocultas por defecto; van al Excel si se eligen.
+  const ROLES_EXP = (DATOS.resumen.roles || []).map(r => ({clave:"resp_" + r.id, id:String(r.id), nombre:r.nombre}));
+  if (DATOS.dominios.some(d => (d.estructura || []).some(r => !ROLES_EXP.some(x => x.id === String(r.id_rol)))))
+    ROLES_EXP.push({clave:"resp_otro", id:null, nombre:"Otro rol"});
+  const claveRol = id => (ROLES_EXP.find(x => x.id === String(id)) || {clave:"resp_otro"}).clave;
+  COLS_EXP.splice(COLS_EXP.findIndex(c => c[0] === "codigo"), 0, ...ROLES_EXP.map(r => [r.clave, r.nombre, 30, 1, 0]));
+  function responsablesPorRol(d){
+    const m = {};
+    for (const r of d.estructura || []){
+      const n = (r.nombre_responsable || "").trim();
+      if (!n) continue;
+      const k = claveRol(r.id_rol);
+      (m[k] = m[k] || new Set()).add(n);
+    }
+    return Object.fromEntries(Object.entries(m).map(([k, s]) => [k, [...s].sort((a, b) => a.localeCompare(b, "es")).join(" | ")]));
+  }
   const NUMERICAS_EXP = new Set(["n_oficiales", "n_consumo", "resta"]);
   const CLAVE_COLS = "gdd_sitio_explorador_columnas";
   const EXP = {sel:{}, texto:"", orden:{campo:"codigo", asc:true}, pagina:0, porPagina:100, columnas:null};
@@ -2062,7 +2130,9 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
     const estadoVinc = new Map();
     if (REL) for (const x of REL.aristas.flatMap(a => a.atributos).concat(REL.problemas)) estadoVinc.set(x.codigo_origen, x.estado);
     const ruta = f => [f.servidor, f.base_datos, f.tabla, f.nombre_campo].filter(Boolean).join(" / ");
+    const respPorDominio = new Map(DATOS.dominios.map(d => [d.codigo, responsablesPorRol(d)]));
     return DATOS.dominios.flatMap(d => d.atributos.map(a => {
+      const resp = respPorDominio.get(d.codigo);
       const fo = a.fuentes_oficiales, fc = a.fuentes_consumo, codigo = d.codigo + "-" + a.codigo_atributo;
       const prim = fo.find(f => f.es_fuente_primaria === "Sí") || fo[0];
       const conf = esConf(d), n_fo = nFO(a), n_fc = nFC(a);
@@ -2083,10 +2153,10 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
         tiene_consumo: n_fc ? "Sí" : "No", n_consumo: n_fc,
         fc_clase: unir(fc, n_fc, "clase"), fc_servidor: unir(fc, n_fc, "servidor"), fc_base_datos: unir(fc, n_fc, "base_datos"),
         fc_tabla: unir(fc, n_fc, "tabla"), fc_campo: unir(fc, n_fc, "nombre_campo"),
-        resta: restaAtributo(a), _a:a, _d:d,
+        resta: restaAtributo(a), ...resp, _a:a, _d:d,
       };
       fila._buscar = sinTildes([codigo, a.nombre_atributo, a.descripcion_atributo, a.atributo_primario, a.dominio_primario,
-        a.tipo_atributo, a.clasificacion_dato_personal,
+        a.tipo_atributo, a.clasificacion_dato_personal, ...Object.values(resp),
         ...fo.flatMap(f => [f.servidor, f.base_datos, f.tabla, f.nombre_campo, f.formula_calculo, f.lista_valores_validos]),
         ...fc.flatMap(f => [f.servidor, f.base_datos, f.tabla, f.nombre_campo, f.clase])].filter(Boolean).join(" ")).toLowerCase();
       return fila;
@@ -2191,7 +2261,7 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
     colsDesp.classList.add("filtro-columnas");
 
     const texto = el("input", {type:"search", clase:"exp-texto", value: EXP.texto,
-      placeholder:"Buscar en código, nombre, descripción, tablas, campos, fórmulas…"});
+      placeholder:"Buscar en código, nombre, descripción, tablas, campos, fórmulas, responsables…"});
     let espera = null;
     texto.addEventListener("input", () => { clearTimeout(espera); espera = setTimeout(() => { EXP.texto = texto.value; pintar(); }, 200); });
     const limpiar = el("button", {type:"button", clase:"btn-detalle", texto:"Limpiar filtros", onclick: () => {
