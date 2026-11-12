@@ -246,6 +246,59 @@ def test_atributo_ausente_en_staging_se_elimina(monkeypatch, staging_repo_vacio)
     mock_repo.eliminar_atributo.assert_called_once_with(conn_usada, 42)
 
 
+def test_reemplazar_atributo_mueve_sus_planes_a_la_version_nueva(monkeypatch, staging_repo_vacio):
+    """Regresion BL-04 (v0.14.1, caso real ATH): al REEMPLAZAR el atributo
+    (fecha_aprobada mas reciente -> version nueva con id nuevo), sus planes
+    de remediacion activos NO se dan de baja: se mueven a la version nueva,
+    en la misma transaccion. Antes quedaban ligados a la version inactiva."""
+    staging_repo_vacio.leer.return_value = [_fila_detalle(fecha=datetime.date(2026, 6, 5))]
+    existentes = {("ADS", 1): ExistenteVersionado(id=42, fecha_aprobacion=datetime.date(2025, 1, 31))}
+    mock_repo = _parchear_repo_gdd(monkeypatch, existentes_atributo=existentes)
+    mock_repo.version_release_atributo.return_value = ("1", None)
+    mock_repo.insertar_atributo.return_value = 777
+    mock_repo.mover_planes_remediacion.return_value = 25
+    engine = MagicMock()
+
+    resultado = carga_gdd.ejecutar_merge_dominio(engine, staging_repo_vacio, "ADS")
+
+    assert resultado.ok, resultado.error
+    assert resultado.atributos_reemplazados == 1
+    conn_usada = engine.begin.return_value.__enter__.return_value
+    mock_repo.eliminar_atributo.assert_called_once_with(conn_usada, 42, baja_planes=False)
+    mock_repo.mover_planes_remediacion.assert_called_once_with(conn_usada, 42, 777)
+
+
+def test_eliminar_atributo_ausente_da_de_baja_sus_planes(monkeypatch, staging_repo_vacio):
+    """Regresion BL-05 (v0.14.1): el atributo que desaparece del Excel se da
+    de baja con baja_planes en su valor por defecto (True): la baja va en
+    cascada a sus planes de remediacion. No se mueve ningun plan."""
+    staging_repo_vacio.leer.return_value = []
+    existentes = {("ADS", 1): ExistenteVersionado(id=42, fecha_aprobacion=datetime.date(2025, 1, 31))}
+    mock_repo = _parchear_repo_gdd(monkeypatch, existentes_atributo=existentes)
+    engine = MagicMock()
+
+    resultado = carga_gdd.ejecutar_merge_dominio(engine, staging_repo_vacio, "ADS")
+
+    assert resultado.ok, resultado.error
+    conn_usada = engine.begin.return_value.__enter__.return_value
+    mock_repo.eliminar_atributo.assert_called_once_with(conn_usada, 42)
+    mock_repo.mover_planes_remediacion.assert_not_called()
+
+
+def test_atributo_actualizado_o_sin_cambios_no_mueve_planes(monkeypatch, staging_repo_vacio):
+    """Misma fecha_aprobada: el atributo conserva su id, los planes no se tocan."""
+    staging_repo_vacio.leer.return_value = [_fila_detalle(fecha=datetime.date(2025, 1, 31))]
+    existentes = {("ADS", 1): ExistenteVersionado(id=42, fecha_aprobacion=datetime.date(2025, 1, 31))}
+    mock_repo = _parchear_repo_gdd(monkeypatch, existentes_atributo=existentes)
+    engine = MagicMock()
+
+    resultado = carga_gdd.ejecutar_merge_dominio(engine, staging_repo_vacio, "ADS")
+
+    assert resultado.ok, resultado.error
+    mock_repo.eliminar_atributo.assert_not_called()
+    mock_repo.mover_planes_remediacion.assert_not_called()
+
+
 @pytest.mark.parametrize(
     "version_actual,version_esperada",
     [(None, "1"), ("1", "2"), ("9", "10"), ("1.0", "1"), ("abc", "1")],
@@ -1341,7 +1394,7 @@ def test_plan_remediacion_existente_con_cambios_se_actualiza_in_place(monkeypatc
     staging_repo.leer_por_prefijo.return_value = [_fila_plan_remediacion(avance="80")]
     existentes = {("ADS-4", "PR1"): ExistenteVersionado(id=42, fecha_aprobacion=None)}
     mock_repo = _parchear_repo_plan_remediacion(monkeypatch, existentes=existentes)
-    mock_repo.campos_actuales.return_value = dict(_CAMPOS_MUTABLES_PLAN_REMEDIACION)
+    mock_repo.campos_actuales.return_value = {"id_atributo": 321, **_CAMPOS_MUTABLES_PLAN_REMEDIACION}
     engine = MagicMock()
 
     resultado = carga_gdd.ejecutar_merge_plan_remediacion_dominio(engine, staging_repo, "ADS")
@@ -1354,10 +1407,39 @@ def test_plan_remediacion_existente_con_cambios_se_actualiza_in_place(monkeypatc
     assert mock_repo.actualizar_plan_remediacion.call_args.args[1] == 42
     campos_actualizados = mock_repo.actualizar_plan_remediacion.call_args.args[2]
     assert campos_actualizados["avance"] == 80
-    # id_atributo/codigo_dominio/codigo_dominio_atributo/id_problema son la
-    # clave -- no deben ir en el UPDATE.
-    assert "id_atributo" not in campos_actualizados
+    # codigo_dominio/codigo_dominio_atributo/id_problema son la clave -- no
+    # van en el UPDATE. id_atributo SI (v0.14.1, BL-04): liga el plan a la
+    # version vigente del atributo (aqui no cambia: 321).
+    assert campos_actualizados["id_atributo"] == 321
+    assert "codigo_dominio" not in campos_actualizados
     assert "codigo_dominio_atributo" not in campos_actualizados
+    assert "id_problema" not in campos_actualizados
+    mock_repo.insertar_plan_remediacion.assert_not_called()
+    mock_repo.eliminar_plan_remediacion.assert_not_called()
+
+
+def test_plan_remediacion_ligado_a_version_vieja_se_religa_a_la_vigente(monkeypatch):
+    """Regresion BL-04 (v0.14.1, caso real ATH): el plan existe y sus campos
+    no cambiaron, pero apunta a la version 1 del atributo (id 100, dada de
+    baja por un REEMPLAZAR). resolver_atributo_por_codigo devuelve la version
+    activa (321): el merge debe actualizar id_atributo."""
+    staging_repo = MagicMock()
+    staging_repo.leer_por_prefijo.return_value = [_fila_plan_remediacion()]
+    existentes = {("ADS-4", "PR1"): ExistenteVersionado(id=42, fecha_aprobacion=None)}
+    mock_repo = _parchear_repo_plan_remediacion(monkeypatch, id_atributo=321, existentes=existentes)
+    mock_repo.campos_actuales.return_value = {"id_atributo": 100, **_CAMPOS_MUTABLES_PLAN_REMEDIACION}
+    engine = MagicMock()
+
+    resultado = carga_gdd.ejecutar_merge_plan_remediacion_dominio(engine, staging_repo, "ADS")
+
+    assert resultado.ok, resultado.error
+    assert resultado.actualizadas == 1
+    assert resultado.sin_cambios == 0
+    # campos_actuales debe pedir id_atributo para poder compararlo.
+    assert "id_atributo" in list(mock_repo.campos_actuales.call_args.args[3])
+    mock_repo.actualizar_plan_remediacion.assert_called_once()
+    assert mock_repo.actualizar_plan_remediacion.call_args.args[1] == 42
+    assert mock_repo.actualizar_plan_remediacion.call_args.args[2]["id_atributo"] == 321
     mock_repo.insertar_plan_remediacion.assert_not_called()
     mock_repo.eliminar_plan_remediacion.assert_not_called()
 
@@ -1367,7 +1449,7 @@ def test_plan_remediacion_existente_sin_cambios_no_actualiza(monkeypatch):
     staging_repo.leer_por_prefijo.return_value = [_fila_plan_remediacion()]
     existentes = {("ADS-4", "PR1"): ExistenteVersionado(id=42, fecha_aprobacion=None)}
     mock_repo = _parchear_repo_plan_remediacion(monkeypatch, existentes=existentes)
-    mock_repo.campos_actuales.return_value = dict(_CAMPOS_MUTABLES_PLAN_REMEDIACION)
+    mock_repo.campos_actuales.return_value = {"id_atributo": 321, **_CAMPOS_MUTABLES_PLAN_REMEDIACION}
     engine = MagicMock()
 
     resultado = carga_gdd.ejecutar_merge_plan_remediacion_dominio(engine, staging_repo, "ADS")
@@ -1414,6 +1496,42 @@ def test_plan_remediacion_atributo_no_encontrado_aborta(monkeypatch):
     assert not resultado.ok
     assert "codigo_atributo=4" in resultado.error
     mock_repo.insertar_plan_remediacion.assert_not_called()
+
+
+def test_plan_de_atributo_quitado_del_excel_aborta_con_mensaje_claro(monkeypatch):
+    """BL-05 (v0.14.1), decision del usuario: si el Excel quita el atributo
+    de DetalleAtributos y deja su plan, el merge de planes del dominio sigue
+    abortando (la cascada ya dio de baja el plan en la transaccion del
+    atributo), pero el error dice que plan es y que hacer."""
+    staging_repo = MagicMock()
+    staging_repo.leer_por_prefijo.return_value = [
+        _fila_plan_remediacion(),
+        _fila_plan_remediacion(codigo_dominio_atributo="ADS-5", id_problema="PR2"),
+    ]
+    mock_repo = _parchear_repo_plan_remediacion(monkeypatch)
+
+    def _resolver(conn, codigo_dominio, codigo_atributo):
+        # ADS-4 ya no tiene version activa; ADS-5 si.
+        if codigo_atributo == 5:
+            return 321
+        raise CatalogoNoEncontradoError(
+            f"gdd.atributo: no existe una fila activa con codigo_dominio='{codigo_dominio}', "
+            f"codigo_atributo={codigo_atributo}."
+        )
+
+    mock_repo.resolver_atributo_por_codigo.side_effect = _resolver
+    engine = MagicMock()
+
+    resultado = carga_gdd.ejecutar_merge_plan_remediacion_dominio(engine, staging_repo, "ADS")
+
+    assert not resultado.ok
+    assert "PlanDeRemediacion ADS-4 (id_problema PR1)" in resultado.error
+    assert "quitar tambien el plan" in resultado.error
+    assert "codigo_atributo=4" in resultado.error
+    # Todo o nada: la excepcion sale del bloque `with engine.begin()`, asi que
+    # la transaccion de planes del dominio se revierte completa.
+    exc_type = engine.begin.return_value.__exit__.call_args.args[0]
+    assert exc_type is CatalogoNoEncontradoError
 
 
 def test_plan_remediacion_catalogo_desconocido_aborta(monkeypatch):

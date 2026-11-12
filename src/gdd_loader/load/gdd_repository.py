@@ -72,6 +72,16 @@ dispare REEMPLAZAR) y misma baja logica que investigacion/dominio_responsable/
 respaldo. Sin bitacora (decision explicita del usuario, igual que las demas
 hojas nuevas de este dia).
 
+CORRECCION 2026-11-12 (v0.14.1, BL-04 y BL-05): el plan sigue a la version
+VIGENTE de su atributo. (1) REEMPLAZAR del atributo mueve los planes activos
+a la version nueva (`mover_planes_remediacion`) en vez de dejarlos en la
+version dada de baja; (2) `eliminar_atributo` da de baja tambien los planes
+activos (salvo en REEMPLAZAR, `baja_planes=False`, donde se mueven); (3) el
+merge de planes compara `id_atributo` como campo mutable, asi que un plan
+que quedo ligado a una version vieja se religa en la siguiente carga. Los
+planes ya existentes se religan con
+db/migraciones/20261112_religar_planes_version_vigente.sql.
+
 gdd.investigacion.referencia_normativa (2026-09-16): columna nueva agregada
 por ampliacion de alcance -- texto libre largo, sin catalogo, mutable igual
 que descripcion (no es parte de la clave natural (codigo_dominio, nombre)).
@@ -464,7 +474,7 @@ def version_release_atributo(conn: Connection, id_atributo: int) -> tuple[str | 
     return (fila.version, fila.release) if fila is not None else (None, None)
 
 
-def eliminar_atributo(conn: Connection, id_atributo: int) -> None:
+def eliminar_atributo(conn: Connection, id_atributo: int, *, baja_planes: bool = True) -> None:
     """Baja logica, NUNCA delete fisico -- ver nota de modulo. Se marcan
     inactivas tambien las fuentes oficiales Y los destinos de consumo hijos
     todavia activos: un atributo dado de baja no debe dejar "huerfanos"
@@ -473,8 +483,22 @@ def eliminar_atributo(conn: Connection, id_atributo: int) -> None:
     atributo_fuente_consumo -- mismo tipo de bug (fila huerfana con activo=1
     tras la baja de su padre) que el corregido antes en staging_repository
     esta misma sesion, esta vez a nivel de la baja logica en gdd.
+
+    [v0.14.1, BL-05] Tambien da de baja los planes de remediacion activos del
+    atributo. Excepcion: REEMPLAZAR llama con `baja_planes=False` porque ahi
+    los planes NO se dan de baja: se mueven a la version nueva con
+    `mover_planes_remediacion` (la fuente oficial y el consumo, en cambio, se
+    reinsertan desde el Excel en la misma transaccion).
     """
     hoy = datetime.date.today()
+    if baja_planes:
+        conn.execute(
+            text(
+                "UPDATE gdd.plan_remediacion SET activo = 0, fecha_baja = :hoy "
+                "WHERE id_atributo = :id AND activo = 1"
+            ),
+            {"id": id_atributo, "hoy": hoy},
+        )
     conn.execute(
         text(
             "UPDATE gdd.atributo_fuente_oficial SET activo = 0, fecha_baja = :hoy "
@@ -877,8 +901,13 @@ def eliminar_respaldo(conn: Connection, id_respaldo: int) -> None:
 # (codigo_dominio_atributo, id_problema) -- codigo_dominio_atributo ya
 # identifica al atributo (viene directo de la hoja, no se hereda), asi que
 # id_atributo se resuelve una sola vez por fila y no es parte de la clave
-# de comparacion en si (aunque en la practica nunca cambia para una misma
-# clave, porque codigo_dominio_atributo -> id_atributo es una funcion).
+# de comparacion en si.
+#
+# [v0.14.1, BL-04] id_atributo SI cambia para una misma clave: apunta a la
+# VERSION vigente del atributo, y cada REEMPLAZAR crea una version (id)
+# nueva. Antes se suponia fijo y los planes quedaban ligados a la version
+# dada de baja. Ahora el merge lo trata como campo mutable y REEMPLAZAR los
+# mueve con `mover_planes_remediacion`.
 
 
 def plan_remediacion_existentes(
@@ -916,10 +945,11 @@ def insertar_plan_remediacion(conn: Connection, campos: dict) -> int:
 
 
 def actualizar_plan_remediacion(conn: Connection, id_plan: int, campos: dict) -> None:
-    """Solo se tocan los campos mutables -- id_atributo/codigo_dominio/
+    """Solo se tocan los campos mutables -- codigo_dominio/
     codigo_dominio_atributo/id_problema son la clave (identidad de la
     fila), no cambian en un UPDATE. El llamador (carga_gdd.py) arma
-    `campos` sin esas cuatro claves antes de llamar aqui.
+    `campos` sin esas tres claves antes de llamar aqui. id_atributo SI va
+    (v0.14.1, BL-04): liga el plan a la version vigente del atributo.
     """
     set_clause = ", ".join(f"[{c}] = :{c}" for c in campos.keys())
     conn.execute(
@@ -935,6 +965,24 @@ def eliminar_plan_remediacion(conn: Connection, id_plan: int) -> None:
         text("UPDATE gdd.plan_remediacion SET activo = 0, fecha_baja = :hoy WHERE id = :id"),
         {"hoy": hoy, "id": id_plan},
     )
+
+
+def mover_planes_remediacion(
+    conn: Connection, id_atributo_anterior: int, id_atributo_nuevo: int
+) -> int:
+    """[v0.14.1, BL-04] Liga los planes ACTIVOS de una version del atributo a
+    su version nueva (REEMPLAZAR). Los planes inactivos se quedan en la
+    version anterior como historial. Devuelve cuantos planes se movieron.
+    No choca con uq_plan_remediacion_clave_natural (codigo_dominio_atributo,
+    id_problema; filtrado activo = 1): la clave no cambia.
+    """
+    return conn.execute(
+        text(
+            "UPDATE gdd.plan_remediacion SET id_atributo = :nuevo "
+            "WHERE id_atributo = :anterior AND activo = 1"
+        ),
+        {"nuevo": id_atributo_nuevo, "anterior": id_atributo_anterior},
+    ).rowcount
 
 
 # --- gdd.atributo_fuente_consumo ---

@@ -130,6 +130,9 @@ from gdd_loader.domain.gdd_mapping import (
 )
 from gdd_loader.domain.gdd_merge_logic import Accion, calcular_plan_merge
 from gdd_loader.load import gdd_repository as repo
+# Importada directo (no via `repo.`): los tests reemplazan `repo` con un
+# MagicMock y un `except repo.CatalogoNoEncontradoError` dejaria de funcionar.
+from gdd_loader.load.gdd_repository import CatalogoNoEncontradoError
 from gdd_loader.load.staging_repository import StagingRepository
 
 logger = logging.getLogger("gdd_loader.pipeline.gdd")
@@ -540,13 +543,26 @@ def ejecutar_merge_dominio(
                     )
                     # repo.eliminar_atributo hace BAJA LOGICA (activo=0), no
                     # DELETE fisico -- la fila vieja queda como historial de
-                    # la version anterior, no desaparece.
-                    repo.eliminar_atributo(conn, op.id_existente)
+                    # la version anterior, no desaparece. baja_planes=False:
+                    # los planes de remediacion no se dan de baja, se mueven
+                    # a la version nueva (abajo).
+                    repo.eliminar_atributo(conn, op.id_existente, baja_planes=False)
                     campos = _resolver_campos_atributo(conn, id_dominio, op.entrante)
                     campos["version"] = _siguiente_version(version_anterior)
                     campos["release"] = release_anterior
                     nuevo_id = repo.insertar_atributo(conn, campos)
                     id_atributo_por_clave[op.clave] = nuevo_id
+                    # [v0.14.1, BL-04] Los planes activos siguen a la version
+                    # vigente, en esta misma transaccion: si el merge de
+                    # planes (transaccion aparte) fallara, no quedan ligados
+                    # a la version dada de baja.
+                    planes_movidos = repo.mover_planes_remediacion(conn, op.id_existente, nuevo_id)
+                    if planes_movidos:
+                        logger.info(
+                            "%s: %s plan(es) de remediacion movido(s) de la version %s a la %s",
+                            codigo_dominio_atributo_op, planes_movidos,
+                            version_anterior, campos["version"],
+                        )
                     resultado.atributos_reemplazados += 1
                     # Una sola linea de bitacora por REEMPLAZAR, con el id
                     # NUEVO (la fila resultante) -- la fila vieja no genera
@@ -1071,9 +1087,21 @@ class ResultadoMergePlanRemediacion:
 
 
 def _resolver_campos_plan_remediacion(conn, pendiente: PlanRemediacionPendiente) -> dict:
-    id_atributo = repo.resolver_atributo_por_codigo(
-        conn, pendiente.codigo_dominio, pendiente.codigo_atributo
-    )
+    try:
+        id_atributo = repo.resolver_atributo_por_codigo(
+            conn, pendiente.codigo_dominio, pendiente.codigo_atributo
+        )
+    except CatalogoNoEncontradoError as exc:
+        # [v0.14.1, BL-05] Decision del usuario (2026-11-12): se mantiene el
+        # error (aborta el merge de planes del dominio), con un mensaje que
+        # dice que hacer. Caso tipico: el Excel quito el atributo de
+        # DetalleAtributos y dejo su plan en PlanDeRemediacion.
+        raise CatalogoNoEncontradoError(
+            f"PlanDeRemediacion {pendiente.codigo_dominio_atributo} (id_problema "
+            f"{pendiente.id_problema}): el atributo no esta activo en gdd.atributo. "
+            "Si se quito de DetalleAtributos, quitar tambien el plan; si no, volver a "
+            f"agregar el atributo. Detalle: {exc}"
+        ) from exc
     return {
         "id_atributo": id_atributo,
         "codigo_dominio": pendiente.codigo_dominio,
@@ -1143,6 +1171,9 @@ def ejecutar_merge_plan_remediacion_dominio(
     UPDATE in-place (decision explicita del usuario) y usa el mismo
     `_hay_cambios` para no tocar la fila si nada cambio de verdad. Sin
     bitacora (decision explicita del usuario).
+
+    [v0.14.1, BL-04] ACTUALIZAR tambien escribe id_atributo cuando el plan
+    apunta a una version del atributo que ya no es la activa.
     """
     resultado = ResultadoMergePlanRemediacion(codigo_dominio=codigo_dominio)
 
@@ -1166,10 +1197,13 @@ def ejecutar_merge_plan_remediacion_dominio(
                     resultado.insertadas += 1
                 elif op.accion == Accion.ACTUALIZAR:
                     campos = _resolver_campos_plan_remediacion(conn, op.entrante)
+                    # [v0.14.1, BL-04] id_atributo es MUTABLE: resolver devuelve
+                    # la version activa del atributo; si el plan apunta a otra
+                    # (una version dada de baja por REEMPLAZAR), se religa.
                     campos_mutables = {
                         k: v
                         for k, v in campos.items()
-                        if k not in ("id_atributo", "codigo_dominio", "codigo_dominio_atributo", "id_problema")
+                        if k not in ("codigo_dominio", "codigo_dominio_atributo", "id_problema")
                     }
                     actuales = repo.campos_actuales(
                         conn, "plan_remediacion", op.id_existente, campos_mutables.keys()
