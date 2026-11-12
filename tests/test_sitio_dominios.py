@@ -582,7 +582,7 @@ def test_pagina_de_planes_lleva_los_planes_y_las_demas_no():
     paginas = generar_sitio(construir_modelo(_datos_planes()), "x")
     datos = {a: _modelo_del_html(h) for a, h in paginas.items()}
     assert sum(len(d["planes"]) for d in datos["planes.html"]["dominios"]) == 4
-    assert all(d["planes"] == [] for a, m in datos.items() if a != "planes.html" for d in m["dominios"])
+    assert all(d["planes"] == [] for a, m in datos.items() if a not in ("planes.html", "sitio_completo.html") for d in m["dominios"])
     html = paginas["planes.html"]
     assert '{id:"planes", titulo:"Planes de remediación"}' in html
     for fn in ("function vistaPlanes", "function pintarResultadoPlanes", "function descargarPlanes", "function construirFilasPlanes"):
@@ -617,6 +617,51 @@ def test_conteos_de_inactivos_no_se_publican():
         assert "n_inactivos" not in resumen and "excluidos_inactivos" not in resumen
 
 
+def test_archivo_unico_para_sharepoint_va_junto_al_sitio_de_varias_paginas():
+    from gdd_loader.exportar.sitio_dominios import ARCHIVO_UNICO
+    paginas = generar_sitio(construir_modelo(_datos()), "x")
+    assert ARCHIVO_UNICO == "sitio_completo.html" and ARCHIVO_UNICO in paginas
+    assert _config_del_html(paginas[ARCHIVO_UNICO]) is None              # todas las secciones, navegacion en memoria
+    assert 'const ARCHIVO_UNICO = "sitio_completo.html"' in paginas["index.html"]   # el aviso del JS nombra el mismo archivo
+
+
+def test_modo_visor_de_sharepoint_sin_descargas_ni_alert_ni_historial():
+    html = generar_html(construir_modelo(_datos()), "x")
+    assert 'const AISLADO = location.protocol === "about:"' in html
+    assert "if (AISLADO){ mostrarCopia(hojas, nombre); return; }" in html     # Excel -> tablas para copiar
+    assert "if (AISLADO) return;" in html                                     # sin historial
+    sin_comentarios = re.sub(r"//[^\n]*", "", html)
+    assert not re.search(r"\balert\(", sin_comentarios)                      # alert no hace nada en el sandbox
+    assert html.count("bajarArchivo(") == 2 and "function entregarLibro" in html   # una definicion + una llamada
+    assert "})().catch(e => {" in html                                        # error inesperado: aviso en la pagina
+    # los accesos a almacenamiento siguen protegidos
+    for m in re.finditer(r"(?:localStorage|sessionStorage)\.", html):
+        assert "try" in html[max(0, m.start() - 200):m.start()], html[m.start() - 80:m.end() + 40]
+
+
+def test_tsv_para_copiar_en_excel_escapa_tabuladores_y_saltos():
+    html = generar_html(construir_modelo(_datos()), "x")
+    assert "function hojaTsv" in html and "/[\\t\\r\\n\"]/.test(s)" in html
+
+
+def test_copia_para_excel_pone_html_con_celdas_de_texto_y_no_congela():
+    # revision adversarial 2026-11-12: el texto plano deja que Excel reinterprete fechas, ceros a la izquierda,
+    # codigos largos y textos con "-": se agrega text/html con mso-number-format:'\@' (texto), como el .xlsx
+    html = generar_html(construir_modelo(_datos()), "x")
+    assert "function hojaHtml" in html and "mso-number-format:'\\\\@'" in html
+    assert 'e.clipboardData.setData("text/html"' in html and 'area.addEventListener("copy", alCopiar)' in html
+    # la hoja completa no se pinta en la textarea (vista previa de 50 filas): no se congela con miles de filas
+    assert "const FILAS_VISTA_PREVIA = 50;" in html and "h.filas.slice(0, FILAS_VISTA_PREVIA)" in html
+    assert 'dlg.addEventListener("close", quitar)' in html and '"aria-labelledby":"titulo-copia"' in html
+
+
+def test_replace_state_no_rompe_en_el_visor_aislado_de_sharepoint():
+    # SharePoint muestra el .html en un iframe about:srcdoc con origen "null": ahi replaceState lanza SecurityError
+    html = generar_html(construir_modelo(_datos()), "x")
+    assert 'try { history.replaceState(null, "", h); } catch (e)' in html
+    assert html.count("history.replaceState(") == 1                   # ningun otro uso sin proteger
+
+
 def test_filtros_de_planes_no_se_podan_y_el_de_dominio_no_aplica_en_un_dominio():
     html = generar_html(construir_modelo(_datos_planes()), "x")
     assert "PLN.sel[campo].delete" not in html                      # no se pierden al cambiar de dominio
@@ -637,7 +682,7 @@ def test_datos_comprimidos_ida_y_vuelta_y_deterministas():
 def test_generar_sitio_una_pagina_por_seccion_con_index():
     paginas = generar_sitio(construir_modelo(_datos(), _grafo_sintetico()), "2026-11-11 10:00", "Glosario")
     assert list(paginas) == ["index.html", "atributos.html", "explorador.html", "investigacion.html",
-                             "terminos.html", "relaciones.html", "indicadores.html", "planes.html"]
+                             "terminos.html", "relaciones.html", "indicadores.html", "planes.html", "sitio_completo.html"]
     for seccion, archivo in PAGINAS.items():
         html = paginas[archivo]
         assert _config_del_html(html) == {"seccion": seccion, "paginas": PAGINAS}
@@ -649,7 +694,7 @@ def test_generar_sitio_una_pagina_por_seccion_con_index():
 
 def test_vis_network_solo_en_la_pagina_de_relaciones():
     paginas = generar_sitio(construir_modelo(_datos(), _grafo_sintetico()), "x")
-    assert [a for a, h in paginas.items() if _inicio_vis() in h] == ["relaciones.html"]
+    assert [a for a, h in paginas.items() if _inicio_vis() in h] == ["relaciones.html", "sitio_completo.html"]
     sin_grafo = generar_sitio(construir_modelo(_datos()), "x")
     assert not any(_inicio_vis() in h for h in sin_grafo.values())
 

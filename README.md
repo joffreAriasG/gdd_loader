@@ -311,8 +311,15 @@ HTML autocontenido (sin internet ni servidor) con menú lateral y ocho secciones
 `investigacion.html`, `terminos.html`, `relaciones.html`, `indicadores.html`, `planes.html`). El diseño es el mismo; el menú
 lateral enlaza las páginas y conserva el dominio elegido. Cada página es autocontenida y lleva solo los datos que
 usa, comprimidos (gzip + base64, unas 9 veces menos); el navegador los descomprime al abrirla (Edge o Chrome
-recientes). Así cada archivo queda muy por debajo del límite de 10 MB por archivo de SharePoint: se sube la
-carpeta completa y se abre `index.html`. `--max-mb` (por defecto 10) avisa si alguna página lo supera.
+recientes). `--max-mb` (por defecto 10) avisa si alguna página supera el límite de 10 MB por archivo de SharePoint.
+La carpeta trae además `sitio_completo.html` (v0.14.2): todas las secciones en un solo archivo.
+
+**En SharePoint se publica solo `sitio_completo.html`.** El visor "Páginas HTML" de SharePoint abre cada archivo
+en un iframe aislado (`sandbox="allow-scripts"`, `about:srcdoc`): no permite pasar de un archivo a otro, ni usar
+el historial del navegador, ni descargar archivos. El sitio lo detecta y se adapta: navega entre secciones dentro
+del mismo archivo y el botón de Excel abre "Copiar para Excel" (la hoja completa al portapapeles, con los textos
+marcados como texto para que Excel no los cambie). Fuera de SharePoint (carpeta local o unidad compartida) se
+usa la carpeta completa desde `index.html` y el Excel se descarga como `.xlsx`.
 Con `--salida sitio.html` se genera un solo archivo con todas las secciones, como antes.
 Los archivos contienen valores reales, incluidos los nombres de los responsables: compartirlo solo con
 el equipo de gobierno de datos.

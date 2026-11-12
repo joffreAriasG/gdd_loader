@@ -570,10 +570,18 @@ def generar_html(modelo: dict, generado_en: str, titulo: str = "Glosario de dato
     )
 
 
+# Archivo unico (todas las secciones, navegacion en memoria) que se genera junto al sitio de varias paginas.
+# Es el que se publica en SharePoint: su visor "Paginas HTML" corre cada archivo en un iframe aislado
+# (sandbox="allow-scripts", srcdoc) donde los enlaces relativos entre paginas no funcionan. El JS usa el mismo nombre.
+ARCHIVO_UNICO = "sitio_completo.html"
+
+
 def generar_sitio(modelo: dict, generado_en: str, titulo: str = "Glosario de datos por dominio") -> dict[str, str]:
-    """Sitio de varias paginas: {nombre_archivo: html}. index.html es "Dominio y estructura"."""
-    return {archivo: generar_html(modelo, generado_en, titulo, seccion)
-            for seccion, archivo in PAGINAS.items()}
+    """Sitio de varias paginas + archivo unico: {nombre_archivo: html}. index.html es "Dominio y estructura";
+    ARCHIVO_UNICO trae todas las secciones en una sola pagina (para SharePoint)."""
+    paginas = {archivo: generar_html(modelo, generado_en, titulo, seccion) for seccion, archivo in PAGINAS.items()}
+    paginas[ARCHIVO_UNICO] = generar_html(modelo, generado_en, titulo)
+    return paginas
 
 
 _PLANTILLA = r"""<!doctype html>
@@ -821,6 +829,17 @@ th.ordenable:hover{background:var(--marino-3)}
 .tabla-planes td{vertical-align:top}
 .det-fuente.det-plan{grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px 18px}
 .det-plan .ancho{grid-column:1/-1}
+.aviso-flotante{display:flex;gap:12px;align-items:flex-start;justify-content:space-between}
+.cerrar-aviso{flex:none}
+.dialogo-copia{width:min(920px,94vw);max-height:88vh;overflow:auto;border:1px solid var(--line);border-radius:10px;
+  background:var(--panel);color:var(--text);padding:16px 18px}
+.dialogo-copia::backdrop{background:rgba(12,19,48,.45)}
+.copia-titulo{display:flex;justify-content:space-between;align-items:center;gap:12px;border-bottom:3px solid var(--amarillo);margin-bottom:10px}
+.copia-titulo h3{margin:0 0 6px;color:var(--acento)}
+.copia-hoja{margin:12px 0}
+.copia-cab{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:6px}
+.copia-texto{width:100%;font:12px/1.4 Consolas,monospace;background:var(--bg);color:var(--text);border:1px solid var(--line);
+  border-radius:6px;padding:6px;white-space:pre;resize:vertical}
 .titulo-seccion-inv{margin:0;font-size:16px;color:var(--acento)}
 .seccion-inv{scroll-margin-top:12px}
 .indice-secciones button{font-weight:600}
@@ -950,6 +969,10 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
   // Sitio de varias paginas (generar_sitio): CONFIG = {seccion, paginas}; un solo archivo: null.
   const CONFIG = JSON.parse(document.getElementById("config").textContent);
   const MULTI = !!CONFIG;
+  // Visor "Paginas HTML" de SharePoint: el archivo corre en <iframe sandbox="allow-scripts" srcdoc> (URL about:srcdoc,
+  // origen "null", base blob:). Ahi NO hay historial, almacenamiento, descargas, alert ni enlaces relativos entre
+  // paginas. El sitio de un solo archivo funciona completo; las descargas se ofrecen como tablas para copiar.
+  const AISLADO = location.protocol === "about:";
   const SECCIONES = [
     {id:"estructura", titulo:"Dominio y estructura"},
     {id:"atributos", titulo:"Atributos y fuentes"},
@@ -970,9 +993,15 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
     return "#" + seccion + (dominio ? "/" + encodeURIComponent(dominio) +
       (filtroAtributo ? "/" + encodeURIComponent(filtroAtributo) : "") : "");
   }
-  // Ir a otra seccion: en el sitio de varias paginas abre la pagina de esa seccion.
+  // Ir a otra seccion: en el sitio de varias paginas abre la pagina de esa seccion. Dentro del visor de SharePoint
+  // eso no es posible (el href relativo no se puede resolver contra la base blob:): se explica que publicar.
+  const ARCHIVO_UNICO = "sitio_completo.html";
+  const TEXTO_SIN_PAGINAS = "Dentro del visor de páginas HTML de SharePoint no se puede pasar de un archivo a otro del sitio. " +
+    "Publique el archivo único «" + ARCHIVO_UNICO + "» (todas las secciones en una sola página) o abra la sección desde la biblioteca.";
   function irA(seccion, dominio, filtroAtributo){
     if (MULTI && seccion !== estado.seccion){
+      if (AISLADO){ avisar("No se puede abrir «" + SECCIONES.find(s => s.id === seccion).titulo + "» desde aquí (ver la nota de arriba).",
+                           "navegacion"); return; }
       location.href = CONFIG.paginas[seccion] + hashDe(seccion, dominio, filtroAtributo);
       return;
     }
@@ -1035,9 +1064,12 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
   function pintarSecciones(){
     const nav = document.getElementById("secciones");
     const contenido = (s, i) => [el("span", {clase:"num", texto:String(i+1)}), s.titulo];
-    nav.replaceChildren(...SECCIONES.map((s, i) => MULTI
+    nav.replaceChildren(...SECCIONES.map((s, i) => MULTI && !AISLADO
       ? el("a", {clase: s.id === estado.seccion ? "activo" : "", href: CONFIG.paginas[s.id] + hashDe(s.id, estado.dominio),
                  "aria-current": s.id === estado.seccion ? "page" : null}, contenido(s, i))
+      : MULTI   // varias paginas dentro del visor de SharePoint: sin enlaces que dejarian la pagina en blanco
+      ? el("button", {clase: s.id === estado.seccion ? "activo" : "", "aria-current": s.id === estado.seccion ? "page" : null,
+                      onclick: () => irA(s.id, estado.dominio)}, contenido(s, i))
       : el("button", {clase: s.id === estado.seccion ? "activo" : "",
                       onclick: () => { estado.seccion = s.id; actualizar(); }}, contenido(s, i))));
   }
@@ -1388,15 +1420,114 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
   }
 
   function descargarAtributos(d, atributos){
-    const {blob, recortes} = libroXlsx(hojasAtributos(d, atributos));
     const t = new Date(), dos = n => String(n).padStart(2, "0");
     const nombre = "atributos_" + d.codigo + (estado.filtroAtributo ? "_filtrado" : "") + "_" + t.getFullYear() + dos(t.getMonth() + 1) +
       dos(t.getDate()) + "_" + dos(t.getHours()) + dos(t.getMinutes()) + ".xlsx";
-    const url = URL.createObjectURL(blob);
-    const a = el("a", {href:url, download:nombre});
-    document.body.append(a); a.click(); a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 2000);
-    if (recortes) alert(recortes + " celda(s) superaban el límite de Excel (32.767 caracteres) y se recortaron.");
+    entregarLibro(hojasAtributos(d, atributos), nombre);
+  }
+
+  // --- entrega del Excel ---------------------------------------------------------------------------------
+  //     Fuera de SharePoint: se descarga el .xlsx. Dentro del visor de SharePoint el sandbox no permite
+  //     descargas (se bloquean en silencio): se ofrecen las hojas como tablas para copiar y pegar en Excel.
+  function entregarLibro(hojas, nombre){
+    if (AISLADO){ mostrarCopia(hojas, nombre); return; }
+    const {blob, recortes} = libroXlsx(hojas);
+    bajarArchivo(blob, nombre);
+    if (recortes) avisar(recortes + " celda(s) superaban el límite de Excel (32.767 caracteres) y se recortaron.");
+  }
+  // Recorte al limite de celda de Excel (igual que el .xlsx); cuenta los recortes en `recortes.n`.
+  function textoCelda(x, recortes){
+    let s = String(x);
+    if (s.length > XLSX_MAX_CELDA){ s = s.slice(0, XLSX_MAX_CELDA - 12) + " [recortado]"; recortes.n++; }
+    return s;
+  }
+  // Texto separado por tabulaciones (respaldo del portapapeles y vista previa); celdas con tabulador, salto o comillas,
+  // entre comillas.
+  function hojaTsv(hoja, recortes){
+    const r = recortes || {n: 0};
+    const celda = x => {
+      if (x === null || x === undefined) return "";
+      const s = textoCelda(x, r);
+      return /[\t\r\n"]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+    };
+    return [hoja.columnas.map(c => celda(c[1])).join("\t")]
+      .concat(hoja.filas.map(f => hoja.columnas.map(c => celda(f[c[0]])).join("\t"))).join("\r\n");
+  }
+  // Tabla HTML para el portapapeles: Excel la prefiere al texto al pegar. Cada celda de texto va marcada como TEXTO
+  // (mso-number-format:'\@') para que Excel no la reinterprete (fechas, ceros a la izquierda, codigos de mas de 15
+  // digitos, textos que empiezan con "-"), igual que el .xlsx (inlineStr). Los numeros (num()) quedan como numero.
+  function hojaHtml(hoja, recortes){
+    const r = recortes || {n: 0};
+    const esc = s => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    const td = x => {
+      if (x === null || x === undefined || x === "") return "<td></td>";
+      if (typeof x === "number" && isFinite(x)) return "<td>" + x + "</td>";
+      return "<td style=\"mso-number-format:'\\@'\">" + esc(textoCelda(x, r)).replace(/\r?\n/g, '<br style="mso-data-placement:same-cell">') + "</td>";
+    };
+    return '<meta charset="utf-8"><table><tr>' + hoja.columnas.map(c => td(c[1])).join("") + "</tr>" +
+      hoja.filas.map(f => "<tr>" + hoja.columnas.map(c => td(f[c[0]])).join("") + "</tr>").join("") + "</table>";
+  }
+  const FILAS_VISTA_PREVIA = 50;
+  function mostrarCopia(hojas, nombre){
+    document.querySelectorAll("dialog.dialogo-copia").forEach(x => x.remove());
+    const recortes = {n: 0};
+    const bloques = hojas.map(h => {
+      // La hoja COMPLETA va directo al portapapeles (evento copy); en pantalla solo una vista previa liviana.
+      let tsv = null, html = null;
+      const alCopiar = e => {
+        if (!e.clipboardData) return;
+        e.clipboardData.setData("text/plain", tsv || (tsv = hojaTsv(h, recortes)));
+        e.clipboardData.setData("text/html", html || (html = hojaHtml(h, {n: 0})));
+        e.preventDefault();
+      };
+      const area = el("textarea", {clase:"copia-texto", readonly:"", rows:"6", "aria-label":"Vista previa de la hoja " + h.nombre});
+      area.value = hojaTsv({columnas: h.columnas, filas: h.filas.slice(0, FILAS_VISTA_PREVIA)}) +
+        (h.filas.length > FILAS_VISTA_PREVIA ? "\n… (vista previa: se copian las " + h.filas.length + " filas)" : "");
+      area.addEventListener("copy", alCopiar);       // Ctrl+C sobre la vista previa: tambien copia la hoja completa
+      const estadoCopia = el("span", {clase:"nota", role:"status", "aria-live":"polite"});
+      const copiar = el("button", {type:"button", clase:"btn-detalle", texto:"Copiar hoja", onclick: () => {
+        let ok = false;
+        document.addEventListener("copy", alCopiar);
+        try { ok = document.execCommand("copy"); } catch (e) { ok = false; } finally { document.removeEventListener("copy", alCopiar); }
+        if (ok){
+          estadoCopia.textContent = "Copiada (" + h.filas.length + " filas): pégala en Excel con Ctrl+V." +
+            (recortes.n ? " " + recortes.n + " celda(s) superaban el límite de Excel y se recortaron." : "");
+          return;
+        }
+        area.focus(); area.select();
+        estadoCopia.textContent = "Presiona Ctrl+C: se copia la hoja completa (" + h.filas.length + " filas).";
+      }});
+      return el("section", {clase:"copia-hoja"}, [
+        el("div", {clase:"copia-cab"}, [el("b", {texto:h.nombre}), el("span", {clase:"nota", texto: h.filas.length + " fila(s)"}), copiar, estadoCopia]),
+        area]);
+    });
+    const previo = document.activeElement;      // el foco vuelve al boton que abrio el dialogo
+    const quitar = () => { if (dlg.isConnected) dlg.remove(); if (previo && previo.isConnected && previo.focus) previo.focus(); };
+    const dlg = el("dialog", {clase:"dialogo-copia", "aria-labelledby":"titulo-copia"}, [
+      el("div", {clase:"copia-titulo"}, [el("h3", {id:"titulo-copia", texto:"Copiar para Excel"}),
+        el("button", {type:"button", clase:"btn-detalle", texto:"Cerrar", onclick: () => { dlg.close(); quitar(); }})]),
+      el("p", {clase:"nota-resp", texto:"Dentro del visor de SharePoint el navegador no permite descargar archivos. Copia cada hoja " +
+        "y pégala en una hoja de Excel (Ctrl+V): las columnas se separan solas y los textos se pegan como texto. " +
+        "Fuera de SharePoint, el mismo botón descarga «" + nombre + "»."}),
+      ...bloques,
+    ]);
+    // Escape: se quita al cerrarse. (El boton "Cerrar" lo quita directo: en el iframe aislado el evento close
+    // no siempre llega; un dialogo cerrado que quedara en el DOM se limpia al abrir el siguiente.)
+    dlg.addEventListener("close", quitar);
+    document.body.append(dlg);
+    try { dlg.showModal(); } catch (e) { dlg.setAttribute("open", ""); }
+  }
+
+  // Aviso dentro de la pagina (alert() no hace nada en el visor de SharePoint).
+  // `grupo`: un aviso nuevo del mismo grupo reemplaza al anterior (no se apilan).
+  function avisar(texto, grupo){
+    const main = document.getElementById("contenido");
+    const clave = grupo || texto;
+    main.querySelectorAll(".aviso-flotante").forEach(x => { if (x.dataset.clave === clave) x.remove(); });   // sin duplicados
+    const caja = el("div", {clase:"avisos aviso-red aviso-flotante", role:"status", "data-clave":clave}, [texto,
+      el("button", {type:"button", clase:"btn-detalle cerrar-aviso", texto:"Cerrar", onclick: () => caja.remove()})]);
+    main.prepend(caja);
+    window.scrollTo(0, 0);
   }
 
   // --- seccion 2
@@ -2400,11 +2531,9 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
       {campo:"Columnas de «Resultado»", valor: cols.map(c => c[1]).join(", ")},
       {campo:"Sitio", valor: generado}, {campo:"Descargado", valor: new Date().toLocaleString("es")},
     ]});
-    const {blob, recortes} = libroXlsx(hojas);
     const t = new Date(), dos = n => String(n).padStart(2, "0");
-    bajarArchivo(blob, "explorador_atributos_" + t.getFullYear() + dos(t.getMonth() + 1) + dos(t.getDate()) + "_" +
+    entregarLibro(hojas, "explorador_atributos_" + t.getFullYear() + dos(t.getMonth() + 1) + dos(t.getDate()) + "_" +
       dos(t.getHours()) + dos(t.getMinutes()) + ".xlsx");
-    if (recortes) alert(recortes + " celda(s) superaban el límite de Excel (32.767 caracteres) y se recortaron.");
   }
 
   // --- seccion 8: planes de remediacion (hoja PlanDeRemediacion -> gdd.plan_remediacion, activos) --------
@@ -2677,11 +2806,9 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
         {campo:"Sitio", valor: generado}, {campo:"Descargado", valor: new Date().toLocaleString("es")},
       ].filter(Boolean)},
     ];
-    const {blob, recortes} = libroXlsx(hojas);
     const t = new Date(), dos = n => String(n).padStart(2, "0");
-    bajarArchivo(blob, "planes_remediacion_" + (d ? d.codigo + "_" : "") + t.getFullYear() + dos(t.getMonth() + 1) + dos(t.getDate()) +
+    entregarLibro(hojas, "planes_remediacion_" + (d ? d.codigo + "_" : "") + t.getFullYear() + dos(t.getMonth() + 1) + dos(t.getDate()) +
       "_" + dos(t.getHours()) + dos(t.getMinutes()) + ".xlsx");
-    if (recortes) alert(recortes + " celda(s) superaban el límite de Excel (32.767 caracteres) y se recortaron.");
   }
 
   function pintarContenido(){
@@ -2702,12 +2829,19 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
     else if (estado.seccion === "investigacion") nodos = vistaInvestigacion(d);
     else nodos = vistaEstructura(d);
     main.replaceChildren(...[].concat(nodos).flat(Infinity).filter(Boolean));
+    // pagina suelta del sitio de varias paginas dentro del visor de SharePoint: el aviso de que publicar se mantiene
+    if (AISLADO && MULTI) main.prepend(el("div", {clase:"avisos aviso-red", role:"note", texto: TEXTO_SIN_PAGINAS}));
     despuesDePintar.splice(0).forEach(f => f());
   }
 
+  // SharePoint muestra los .html dentro de un iframe aislado (about:srcdoc, origen "null", base blob:): ahi
+  // history.replaceState lanza. Guardar la seccion/dominio en la URL es solo una comodidad: si no se puede,
+  // se sigue sin ella (sin error).
   function guardarHash(){
+    if (AISLADO) return;                      // en el visor de SharePoint el estado vive solo en memoria
     const h = hashDe(estado.seccion, estado.dominio);
-    if (location.hash !== h) history.replaceState(null, "", h);
+    if (location.hash === h) return;
+    try { history.replaceState(null, "", h); } catch (e) { /* entorno aislado: sin estado en la URL */ }
   }
   function leerHash(){
     const [s, dom, filtro] = location.hash.replace(/^#/, "").split("/");
@@ -2727,7 +2861,20 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
   window.addEventListener("hashchange", () => { leerHash(); actualizar(); });
   leerHash();
   actualizar();
-})();
+  if (AISLADO){
+    const marca = document.querySelector(".marca small");
+    if (marca) marca.textContent += " · vista en SharePoint";
+  }
+})().catch(e => {
+  // Error inesperado: se muestra en la pagina (en SharePoint, una promesa rechazada sin capturar pinta un banner rojo).
+  const aviso = document.createElement("div");
+  aviso.className = "avisos";
+  aviso.textContent = "Error del sitio: " + ((e && e.message) || e) + ". Intente recargar la página.";
+  const cargando = document.getElementById("cargando");
+  if (cargando) cargando.remove();
+  document.getElementById("contenido").prepend(aviso);
+  if (window.console) console.error(e);
+});
 </script>
 </body>
 </html>

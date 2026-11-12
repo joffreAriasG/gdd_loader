@@ -16,9 +16,12 @@ Salida (v0.13.0):
   - --salida <carpeta> (por defecto): crea <carpeta>\\sitio_dominios_AAAAMMDD_HHMM\\ con
     index.html (seccion 1) y una pagina por seccion (atributos.html, explorador.html,
     investigacion.html, terminos.html, relaciones.html, indicadores.html, planes.html). Mismo
-    diseno; el menu lateral enlaza las paginas. Se publica la carpeta completa
-    (por ejemplo en una biblioteca de SharePoint) y se abre index.html.
-  - --salida <archivo>.html: un solo HTML con todas las secciones (como v0.12.0).
+    diseno; el menu lateral enlaza las paginas: sirve para abrir la carpeta en el equipo o en una
+    unidad compartida. Ademas (v0.14.2) deja sitio_completo.html: todas las secciones en un solo
+    archivo. ES EL QUE SE PUBLICA EN SHAREPOINT: el visor "Paginas HTML" corre cada .html en un
+    iframe aislado (sandbox="allow-scripts", srcdoc) donde no se puede pasar de un archivo a otro,
+    ni descargar (el Excel se ofrece como tablas para copiar), ni guardar preferencias.
+  - --salida <archivo>.html: solo el archivo unico con todas las secciones.
   Los datos van comprimidos dentro de cada pagina. Si alguna pagina supera --max-mb
   (por defecto 10, el limite por archivo de SharePoint), se registra una advertencia.
 
@@ -46,8 +49,9 @@ from pathlib import Path
 
 from gdd_loader.config import cargar_settings
 from gdd_loader.exportar.grafo_relaciones import construir_modelo as construir_modelo_grafo
-from gdd_loader.exportar.sitio_dominios import (codigos_inactivos, construir_modelo, describir_estado_inactivo,
-                                                filtrar_relaciones_vigencia, generar_html, generar_sitio)
+from gdd_loader.exportar.sitio_dominios import (ARCHIVO_UNICO, codigos_inactivos, construir_modelo,
+                                                describir_estado_inactivo, filtrar_relaciones_vigencia, generar_html,
+                                                generar_sitio)
 from gdd_loader.load.db import construir_engine
 from gdd_loader.load.grafo_repository import VistaNoExisteError, leer_dominios, leer_relaciones
 from gdd_loader.load.sitio_repository import FaltaEstadoVigenciaError, leer_todo
@@ -167,7 +171,11 @@ def main() -> int:
             return 1
         for nombre, html in paginas.items():
             logger.info("  %-20s %.2f MB", nombre, len(html.encode("utf-8")) / 1e6)
-        logger.info("Sitio generado (%d paginas): %s  -> abrir index.html", len(paginas), ruta.resolve())
+        logger.info("Sitio generado (%d paginas + %s): %s  -> abrir index.html", len(paginas) - 1, ARCHIVO_UNICO,
+                    ruta.resolve())
+        logger.info("Para SharePoint (Paginas del sitio) publicar SOLO %s: el visor de SharePoint no permite pasar de un "
+                    "archivo a otro; las paginas sueltas sirven para abrir la carpeta en el equipo o en una unidad compartida.",
+                    ARCHIVO_UNICO)
     for nombre, mb in paginas_excedidas(paginas, args.max_mb):
         logger.warning("La pagina %s pesa %.2f MB: supera el limite de %.0f MB.", nombre, mb, args.max_mb)
     return 0
