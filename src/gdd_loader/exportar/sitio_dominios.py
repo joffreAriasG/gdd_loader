@@ -546,7 +546,7 @@ def modelo_para_seccion(modelo: dict, seccion: str) -> dict:
             "relaciones": modelo.get("relaciones") if con_relaciones else None}
 
 
-def generar_html(modelo: dict, generado_en: str, titulo: str = "Glosario de datos por dominio",
+def generar_html(modelo: dict, generado_en: str, titulo: str = "Glosario de dominios",
                  seccion: str | None = None) -> str:
     """Sin `seccion`: un solo HTML con todas las secciones. Con `seccion`: la pagina de esa
     seccion dentro del sitio de varias paginas (ver generar_sitio)."""
@@ -576,7 +576,7 @@ def generar_html(modelo: dict, generado_en: str, titulo: str = "Glosario de dato
 ARCHIVO_UNICO = "sitio_completo.html"
 
 
-def generar_sitio(modelo: dict, generado_en: str, titulo: str = "Glosario de datos por dominio") -> dict[str, str]:
+def generar_sitio(modelo: dict, generado_en: str, titulo: str = "Glosario de dominios") -> dict[str, str]:
     """Sitio de varias paginas + archivo unico: {nombre_archivo: html}. index.html es "Dominio y estructura";
     ARCHIVO_UNICO trae todas las secciones en una sola pagina (para SharePoint)."""
     paginas = {archivo: generar_html(modelo, generado_en, titulo, seccion) for seccion, archivo in PAGINAS.items()}

@@ -63,7 +63,7 @@ def _construir_parser() -> argparse.ArgumentParser:
     parser.add_argument("--salida", default=".",
                         help="Carpeta donde se crea el sitio de varias paginas, o ruta .html para un solo "
                              "archivo. Por defecto, la carpeta actual.")
-    parser.add_argument("--titulo", default="Glosario de datos por dominio", help="Titulo de la pagina")
+    parser.add_argument("--titulo", default="Glosario de dominios", help="Titulo de la pagina")
     parser.add_argument("--max-mb", type=float, default=10.0,
                         help="Advertir si una pagina supera este tamano en MB (por defecto 10)")
     parser.add_argument("--env-file", default=None, help="Ruta a un .env especifico (opcional)")
