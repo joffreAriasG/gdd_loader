@@ -10,11 +10,12 @@ Secciones del menu lateral, por dominio:
   5. Glosario de terminos (clasificacion "Término" de Investigacion, todos los dominios)
   6. Relaciones entre dominios (grafo de atributos Compartido / Similar)
   7. Indicadores (puntaje de fuente oficial y cumplimiento por dominio)
+  8. Planes de remediacion (v0.14.0: resumen, tabla con detalle desplegable, filtros y Excel)
 
 Salida (v0.13.0):
   - --salida <carpeta> (por defecto): crea <carpeta>\\sitio_dominios_AAAAMMDD_HHMM\\ con
     index.html (seccion 1) y una pagina por seccion (atributos.html, explorador.html,
-    investigacion.html, terminos.html, relaciones.html, indicadores.html). Mismo
+    investigacion.html, terminos.html, relaciones.html, indicadores.html, planes.html). Mismo
     diseno; el menu lateral enlaza las paginas. Se publica la carpeta completa
     (por ejemplo en una biblioteca de SharePoint) y se abre index.html.
   - --salida <archivo>.html: un solo HTML con todas las secciones (como v0.12.0).
@@ -125,6 +126,14 @@ def main() -> int:
                 "publicados sin fuentes oficiales ni de consumo", r["n_inactivos"], r["n_confidenciales"])
     for entidad, n in r["excluidos_inactivos"].items():
         logger.info("  %d registros de %s de dominios Inactivos no se publican", n, entidad)
+    if r["planes_sin_atributo_vigente"]:
+        logger.warning("%d plan(es) de remediacion activos son de atributos sin version vigente (dados de baja); "
+                       "el sitio los muestra marcados. Revisar la baja en cascada de planes.",
+                       r["planes_sin_atributo_vigente"])
+    if r["planes_version_anterior"]:
+        logger.warning("%d plan(es) de remediacion activos siguen ligados a una version anterior (inactiva) de su "
+                       "atributo; el sitio los muestra con la version vigente. Revisar el merge de planes.",
+                       r["planes_version_anterior"])
     if relaciones is not None:
         rr = relaciones["resumen"]
         logger.info("Relaciones: %d de %d dominios relacionados, %d aristas, %d de %d atributos relacionados en el grafo",

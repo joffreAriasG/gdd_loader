@@ -30,6 +30,12 @@ servidor) con menu lateral y tres secciones por dominio:
                                   ROLES_REQUERIDOS), fuentes de consumo, respaldos,
                                   glosario y vinculos. Graficos en HTML segun el tipo
                                   de variable, cada uno con su vista de tabla.
+  7. Planes de remediacion (v0.14.0) -> gdd.plan_remediacion activos (SQL_PLANES los une a
+                                  la version VIGENTE del atributo): por dominio, tabla con
+                                  detalle desplegable; con "Todos", indicadores y graficos
+                                  (estado, dimension, dominio, avance) + tabla. Filtros,
+                                  paginas de 100 y Excel. Confidencial: sin
+                                  fuente_oficial_sistema (se quita aqui, no viaja en el HTML).
 
 Solo lectura: se arma con lo que load/sitio_repository.leer_todo devuelve de
 gdd.* (registros activos). construir_modelo es pura (testeable sin base).
@@ -231,6 +237,14 @@ def vinculos_por_dominio(relaciones: dict | None) -> dict[str, dict]:
     return conteo
 
 
+ORDEN_ESTADO_PLAN = ("alertado", "en proceso", "finalizado")   # cat_estado_plan, en el orden de trabajo
+
+
+def _orden_estado_plan(estado: str | None) -> int:
+    e = _sin_tildes(estado)
+    return ORDEN_ESTADO_PLAN.index(e) if e in ORDEN_ESTADO_PLAN else len(ORDEN_ESTADO_PLAN)
+
+
 def _orden_natural(valor: str):
     """'10' despues de '9'; textos no numericos al final, en orden alfabetico."""
     return (0, int(valor), "") if re.fullmatch(r"\d+", valor or "") else (1, 0, (valor or "").lower())
@@ -320,6 +334,7 @@ def construir_modelo(datos: dict[str, list[dict]], relaciones: dict | None = Non
             "respaldos": [],
             "atributos": [],
             "investigacion": [],
+            "planes": [],
         }
 
     huerfanos: dict[str, int] = {}
@@ -336,7 +351,7 @@ def construir_modelo(datos: dict[str, list[dict]], relaciones: dict | None = Non
         return d
 
     for entidad, lista in (("responsables", "estructura"), ("respaldos", "respaldos"),
-                           ("investigacion", "investigacion")):
+                           ("investigacion", "investigacion"), ("planes", "planes")):
         for fila in datos.get(entidad, []):
             t = _textos(fila)
             d = _destino(t, entidad)
@@ -382,6 +397,8 @@ def construir_modelo(datos: dict[str, list[dict]], relaciones: dict | None = Non
         d["estructura"].sort(key=lambda r: (r.get("rol", ""), r.get("area", ""), r.get("codigo_plaza", "")))
         d["respaldos"].sort(key=lambda r: (r.get("tipo_respaldo", ""), r.get("enlace_respaldo", "")))
         d["investigacion"].sort(key=lambda r: (r.get("clasificacion", ""), r.get("nombre", "").lower()))
+        d["planes"].sort(key=lambda p: (_orden_estado_plan(p.get("estado")), p.get("fecha_finalizacion_definitiva") or "9999",
+                                        _orden_natural(p.get("codigo_atributo", "")), _orden_natural(p.get("id_problema", ""))))
         d["conteos"] = {
             "estructura": len(d["estructura"]),
             "respaldos": len(d["respaldos"]),
@@ -390,6 +407,7 @@ def construir_modelo(datos: dict[str, list[dict]], relaciones: dict | None = Non
             "fuentes_consumo": sum(len(a["fuentes_consumo"]) for a in d["atributos"]),
             "investigacion": sum(1 for r in d["investigacion"] if not es_termino(r.get("clasificacion"))),
             "terminos": sum(1 for r in d["investigacion"] if es_termino(r.get("clasificacion"))),
+            "planes": len(d["planes"]),
         }
 
     vinculos = vinculos_por_dominio(relaciones)
@@ -407,11 +425,14 @@ def construir_modelo(datos: dict[str, list[dict]], relaciones: dict | None = Non
             if oculto:
                 a["fuentes_oficiales"] = []
                 a["fuentes_consumo"] = []
+        if oculto:   # planes de un dominio Confidencial: sin el sistema fuente (regla del usuario 2026-11-12)
+            for p in d["planes"]:
+                p.pop("fuente_oficial_sistema", None)
 
     lista = sorted(dominios.values(), key=lambda d: d["codigo"])
     totales = {k: sum(d["conteos"][k] for d in lista) for k in
                ("estructura", "respaldos", "atributos", "fuentes_oficiales", "fuentes_consumo", "investigacion",
-                "terminos")}
+                "terminos", "planes")}
     nombres_rol = {}
     for r in datos.get("roles", []):
         try:
@@ -442,6 +463,11 @@ def construir_modelo(datos: dict[str, list[dict]], relaciones: dict | None = Non
             # todos los roles de cat_rol (columnas de responsables del Explorador)
             "roles": [{"id": i, "nombre": n} for i, n in sorted(nombres_rol.items())],
             "secciones_investigacion": secciones_investigacion,
+            # planes ligados a una version anterior (inactiva) de un atributo que SI tiene version vigente, y planes
+            # activos cuyo atributo ya no tiene ninguna version activa: ver SQL_PLANES (hallazgos 2026-11-12)
+            "planes_version_anterior": sum(1 for d in lista for p in d["planes"]
+                                           if p.get("version_ligada_activa") == "0" and p.get("atributo_vigente") != "0"),
+            "planes_sin_atributo_vigente": sum(1 for d in lista for p in d["planes"] if p.get("atributo_vigente") == "0"),
             "indicadores": {
                 "penalizacion": PENALIZACION,
                 "roles_requeridos": [{"id": i, "nombre": nombres_rol.get(i, f"Rol {i}")} for i in ROLES_REQUERIDOS],
@@ -486,6 +512,7 @@ PAGINAS = {
     "terminos": "terminos.html",
     "relaciones": "relaciones.html",
     "indicadores": "indicadores.html",
+    "planes": "planes.html",
 }
 
 # Datos que necesita cada pagina, ademas de "resumen" y, por dominio, de las claves
@@ -501,7 +528,11 @@ _CLAVES_POR_SECCION = {
     "terminos": ({"investigacion"}, False),
     "relaciones": (set(), True),
     "indicadores": ({"indicadores"}, True),
+    "planes": ({"planes"}, False),
 }
+
+
+_RESUMEN_NO_PUBLICADO = frozenset({"n_inactivos", "excluidos_inactivos"})
 
 
 def modelo_para_seccion(modelo: dict, seccion: str) -> dict:
@@ -522,6 +553,9 @@ def generar_html(modelo: dict, generado_en: str, titulo: str = "Glosario de dato
     if seccion is not None and seccion not in PAGINAS:
         raise ValueError(f"Seccion desconocida: {seccion}")
     datos = modelo if seccion is None else modelo_para_seccion(modelo, seccion)
+    # Los conteos de dominios Inactivos sirven para el log de sitio_cli, pero no se publican (regla: un
+    # dominio Inactivo no aparece en ninguna pagina ni numero; hallazgo de la revision 2026-11-12).
+    datos = {**datos, "resumen": {k: v for k, v in datos["resumen"].items() if k not in _RESUMEN_NO_PUBLICADO}}
     # vis-network (~690 KB) solo se incrusta donde se dibuja el grafo.
     con_vis = bool(datos.get("relaciones")) and seccion in (None, "relaciones")
     vis_js = (RECURSOS / ARCHIVO_VIS).read_text(encoding="utf-8") if con_vis else ""
@@ -555,7 +589,8 @@ _PLANTILLA = r"""<!doctype html>
   --amarillo:#FDE338; --amarillo-fuerte:#FCCF33; --amarillo-suave:#FFF7CC;
   --marino:#14245C; --marino-2:#1E3270; --marino-3:#2A3F82; --marino-suave:#E8ECF6;
   --bg:#F6F8FB; --panel:#FFFFFF; --text:#1B2547; --muted:#6B7690; --line:#DDE3EC; --chip:#EEF1F6;
-  --verde:#1E9E4A; --verde-suave:#E4F4EA; --rojo:#D93A3E; --rojo-suave:#FBE6E7;
+  /* verde y rojo de texto oscurecidos (v0.14.0): 4,76:1 y 5,47:1 sobre su fondo suave (antes 3,05 y 3,8) */
+  --verde:#157A38; --verde-suave:#E4F4EA; --rojo:#B42328; --rojo-suave:#FBE6E7;
   --side:var(--marino); --side-text:#E3E8F5; --side-muted:#9FAACB; --side-hover:var(--marino-2);
   --side-active:var(--marino-3); --banda-texto:var(--marino); --th-bg:var(--marino); --th-text:#FFFFFF;
   --acento:var(--marino);
@@ -777,6 +812,15 @@ th.ordenable:hover{background:var(--marino-3)}
 .termino h4{margin:0;font-size:15px;color:var(--acento)}
 .termino p{margin:0;white-space:pre-wrap;word-break:break-word;line-height:1.55}
 .termino-ref{margin-top:8px;color:var(--muted);font-size:12.5px;word-break:break-word}
+.estado.proceso{background:var(--amarillo-suave);color:var(--text)}
+.estado.neutro{background:var(--chip);color:var(--text)}
+.marca-vencido{margin-left:6px}
+.avance{display:flex;align-items:center;gap:6px;min-width:110px}
+.avance-pista{flex:1;min-width:50px;height:6px;border-radius:3px;background:var(--line);overflow:hidden}
+.avance-relleno{height:100%;background:var(--serie-1);border-radius:0 3px 3px 0}
+.tabla-planes td{vertical-align:top}
+.det-fuente.det-plan{grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px 18px}
+.det-plan .ancho{grid-column:1/-1}
 .titulo-seccion-inv{margin:0;font-size:16px;color:var(--acento)}
 .seccion-inv{scroll-margin-top:12px}
 .indice-secciones button{font-weight:600}
@@ -914,6 +958,7 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
     {id:"terminos", titulo:"Glosario de términos"},
     {id:"relaciones", titulo:"Relaciones entre dominios"},
     {id:"indicadores", titulo:"Indicadores"},
+    {id:"planes", titulo:"Planes de remediación"},
   ];
   const porCodigo = new Map(DATOS.dominios.map(d => [d.codigo, d]));
   const estado = {seccion: MULTI ? CONFIG.seccion : "estructura", dominio:null, filtroDominio:"", filtroAtributo:"",
@@ -2362,6 +2407,283 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
     if (recortes) alert(recortes + " celda(s) superaban el límite de Excel (32.767 caracteres) y se recortaron.");
   }
 
+  // --- seccion 8: planes de remediacion (hoja PlanDeRemediacion -> gdd.plan_remediacion, activos) --------
+  //     Por dominio: tabla con fila desplegable (detalle del plan). Con "Todos": resumen con graficos
+  //     (estado, dimension, dominio, avance) y la tabla de todos los planes. Filtros de seleccion multiple
+  //     + texto, 100 filas por pagina y Descargar Excel del resultado filtrado.
+  //     Dominio confidencial: sin "Fuente oficial / sistema" (Python ya lo quito de los datos).
+  //     "Vencido": fecha definitiva anterior a HOY (fecha del navegador) y estado distinto de Finalizado.
+  const normPlan = s => sinTildes(s).trim().toLowerCase();
+  const ORDEN_ESTADO_PLAN = ["alertado", "en proceso", "finalizado"];
+  const ordenEstadoPlan = p => { const i = ORDEN_ESTADO_PLAN.indexOf(normPlan(p.estado)); return i < 0 ? 9 : i; };
+  const RANGOS_AVANCE = ["0 %", "1–25 %", "26–50 %", "51–75 %", "76–99 %", "100 %", "Sin dato"];
+  const hoyISO = (() => { const t = new Date(), dos = n => String(n).padStart(2, "0");
+    return t.getFullYear() + "-" + dos(t.getMonth() + 1) + "-" + dos(t.getDate()); })();
+  const PLN = {sel:{}, texto:"", pagina:0, porPagina:100};
+  let FILAS_PLN = null;
+
+  function avancePlan(p){
+    const t = String(p.avance ?? "").trim(), n = Number(t);
+    return t === "" || !isFinite(n) ? null : n;
+  }
+  function rangoAvance(n){
+    if (n === null) return "Sin dato";
+    if (n <= 0) return "0 %";
+    if (n >= 100) return "100 %";
+    return n <= 25 ? "1–25 %" : n <= 50 ? "26–50 %" : n <= 75 ? "51–75 %" : "76–99 %";
+  }
+  const esVencido = p => !!p.fecha_finalizacion_definitiva && p.fecha_finalizacion_definitiva < hoyISO &&
+    normPlan(p.estado) !== "finalizado";
+
+  function construirFilasPlanes(){
+    const filas = DATOS.dominios.flatMap(d => (d.planes || []).map(p => {
+      const n = avancePlan(p);
+      const fila = {...p, dominio:d.codigo, nombre_dominio:d.nombre, _d:d,
+        atributo: d.codigo + "-" + p.codigo_atributo, avance_num:n, rango_avance: rangoAvance(n),
+        vencido: esVencido(p) ? "Sí" : "No", estado: p.estado || "", dimension: p.dimension || "",
+        fuente_oficial_sistema: esConf(d) ? OCULTO_CONF : (p.fuente_oficial_sistema || ""),
+        // atributo sin version vigente (dado de baja) / plan ligado a una version anterior de un atributo vigente
+        atributo_vigente: p.atributo_vigente === "0" ? "No" : "Sí",
+        version_anterior: p.version_ligada_activa === "0" && p.atributo_vigente !== "0" ? "Sí" : "No"};
+      fila._buscar = sinTildes([fila.atributo, p.nombre_atributo, p.id_problema, p.dimension, p.categoria,
+        esConf(d) ? "" : p.fuente_oficial_sistema, p.tipo_plan, p.categoria_plan, p.subcategoria_plan, p.priorizacion,
+        p.estado, p.descripcion_causa_raiz, p.persona_responsable, p.dependencias, p.observacion,
+        p.acciones_corto_plazo, p.acciones_definitivo, p.siro].filter(Boolean).join(" ")).toLowerCase();
+      return fila;
+    }));
+    return filas.sort((a, b) => a.dominio.localeCompare(b.dominio) || ordenEstadoPlan(a) - ordenEstadoPlan(b) ||
+      String(a.fecha_finalizacion_definitiva || "9999").localeCompare(String(b.fecha_finalizacion_definitiva || "9999")) ||
+      a.atributo.localeCompare(b.atributo, "es", {numeric:true}) || String(a.id_problema).localeCompare(String(b.id_problema), "es", {numeric:true}));
+  }
+
+  function chipEstadoPlan(e){
+    const k = normPlan(e);
+    const [clase, icono] = k === "finalizado" ? ["ok", "✓"] : k === "en proceso" ? ["proceso", "◐"]
+      : k === "alertado" ? ["no", "!"] : ["neutro", "•"];
+    return el("span", {clase:"estado " + clase}, [el("span", {clase:"icono", "aria-hidden":"true", texto:icono}), e || "Sin estado"]);
+  }
+  function celdaAvance(n){
+    return el("div", {clase:"avance", title: n === null ? "Sin dato de avance" : n + " % de avance"}, [
+      el("div", {clase:"avance-pista"}, n === null ? null : el("div", {clase:"avance-relleno", style:"width:" + Math.max(0, Math.min(100, n)) + "%"})),
+      el("span", {texto: n === null ? "—" : n + " %"}),
+    ]);
+  }
+
+  function filtrosPlanes(base, conDominio){
+    const vacio = {dimension:"(sin dimensión)", estado:"(sin estado)", tipo_plan:"(sin tipo)", categoria_plan:"(sin categoría)",
+                   priorizacion:"(sin priorización)"};
+    const defs = [conDominio ? ["dominio","Dominio"] : null, ["estado","Estado"], ["dimension","Dimensión"],
+      ["tipo_plan","Tipo de plan"], ["categoria_plan","Categoría del plan"], ["priorizacion","Priorización"],
+      ["rango_avance","Avance"], ["vencido","Vencido"]].filter(Boolean);
+    return defs.map(([campo, titulo]) => {
+      const n = new Map();
+      for (const f of base) n.set(f[campo] || "", (n.get(f[campo] || "") || 0) + 1);
+      let opciones = [...n].map(([valor, cuantos]) => ({valor, n:cuantos,
+        etiqueta: campo === "dominio" ? valor + " · " + (porCodigo.get(valor) || {}).nombre
+          : campo === "vencido" ? (valor === "Sí" ? "Vencidos" : "No vencidos") : valor || vacio[campo] || "(vacío)"}));
+      if (campo === "estado") opciones.sort((a, b) => ordenEstadoPlan({estado:a.valor}) - ordenEstadoPlan({estado:b.valor}));
+      else if (campo === "rango_avance") opciones.sort((a, b) => RANGOS_AVANCE.indexOf(a.valor) - RANGOS_AVANCE.indexOf(b.valor));
+      else opciones.sort((a, b) => a.etiqueta.localeCompare(b.etiqueta, "es", {numeric:true}));
+      if (!PLN.sel[campo]) PLN.sel[campo] = new Set();
+      // Los filtros se comparten entre "Todos" y cada dominio y NO se podan (no se pierden al cambiar de
+      // dominio): un valor elegido que no existe aqui se muestra con cantidad 0 para que se vea y se pueda quitar.
+      for (const valor of PLN.sel[campo]) if (!n.has(valor)) opciones.push({valor, n:0,
+        etiqueta: campo === "dominio" ? valor : campo === "vencido" ? (valor === "Sí" ? "Vencidos" : "No vencidos") : valor || "(vacío)"});
+      return {campo, titulo, opciones};
+    });
+  }
+  // `d` = dominio abierto: ahi el filtro "Dominio" de la vista "Todos" no se dibuja, asi que tampoco se aplica.
+  function filasFiltradasPlanes(base, d){
+    const palabras = sinTildes(PLN.texto).toLowerCase().split(/\s+/).filter(Boolean);
+    const activos = Object.entries(PLN.sel).filter(([c, s]) => s.size && !(d && c === "dominio"));
+    return base.filter(f => activos.every(([c, s]) => s.has(f[c] || "")) && palabras.every(p => f._buscar.includes(p)));
+  }
+
+  function resumenPlanes(filas){
+    const conAvance = filas.filter(f => f.avance_num !== null);
+    const prom = conAvance.length ? Math.round(conAvance.reduce((s, f) => s + f.avance_num, 0) / conAvance.length) : null;
+    const fin = filas.filter(f => normPlan(f.estado) === "finalizado").length;
+    return {total: filas.length, promedio: prom, vencidos: filas.filter(f => f.vencido === "Sí").length, finalizados: fin,
+            dominios: new Set(filas.map(f => f.dominio)).size};
+  }
+  function kpisPlanes(r, conDominios){
+    return el("div", {clase:"kpis"}, [
+      ["Planes de remediación", String(r.total)],
+      conDominios ? ["Dominios con planes", r.dominios + " de " + DATOS.dominios.length] : null,
+      ["Avance promedio", r.promedio === null ? "—" : r.promedio + " %"],
+      ["Finalizados", r.finalizados + " de " + r.total],
+      ["Vencidos al día de hoy", String(r.vencidos)],
+    ].filter(Boolean).map(([e, n]) => el("div", {clase:"kpi"}, [el("b", {texto:n}), el("span", {texto:e})])));
+  }
+
+  // Conteo por categoria -> barras horizontales de una serie (magnitud), con su vista de tabla.
+  function graficoConteo(titulo, filas, campo, orden, alClic){
+    const n = new Map();
+    for (const f of filas) n.set(f[campo] || "(sin dato)", (n.get(f[campo] || "(sin dato)") || 0) + 1);
+    let pares = [...n];
+    if (orden) pares.sort((a, b) => orden(a[0]) - orden(b[0]));
+    else pares.sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], "es"));
+    const total = filas.length, max = Math.max(1, ...pares.map(p => p[1]));
+    const datos = pares.map(([k, c]) => ({etiqueta:k, sub: campo === "dominio" ? (porCodigo.get(k) || {}).nombre : null,
+      valor:c, texto:String(c), onclick: alClic ? () => alClic(k) : null,
+      tip:[[c + " de " + total, titulo.toLowerCase() + ": " + k], [pct(c, total), "del total de planes"]]}));
+    return el("div", null, [el("h4", {clase:"titulo-multiplo", texto:titulo}),
+      conTabla(barrasH(datos, max), [["etiqueta", titulo], ["texto", "Planes"]], datos)]);
+  }
+
+  function vistaPlanes(d){
+    if (!FILAS_PLN) FILAS_PLN = construirFilasPlanes();
+    const base = d ? FILAS_PLN.filter(f => f.dominio === d.codigo) : FILAS_PLN;
+    const ambito = d ? d.codigo : "*";
+    if (PLN.ambito !== ambito){ PLN.ambito = ambito; PLN.pagina = 0; }
+    const filtros = filtrosPlanes(base, !d);
+    const resultado = el("div", {clase:"exp-resultado"});
+    const pintar = () => { PLN.pagina = 0; pintarResultadoPlanes(resultado, base, d); };
+    const desplegables = filtros.map(f => desplegableMulti(f.titulo, f.opciones, PLN.sel[f.campo], pintar, true));
+    const texto = el("input", {type:"search", clase:"exp-texto", value: PLN.texto,
+      placeholder:"Buscar en atributo, problema, causa raíz, acciones, responsable, observación…"});
+    let espera = null;
+    texto.addEventListener("input", () => { clearTimeout(espera); espera = setTimeout(() => { PLN.texto = texto.value; pintar(); }, 200); });
+    const limpiar = el("button", {type:"button", clase:"btn-detalle", texto:"Limpiar filtros", onclick: () => {
+      Object.values(PLN.sel).forEach(s => s.clear()); PLN.texto = ""; texto.value = "";
+      desplegables.forEach(x => x.refrescar()); pintar();
+    }});
+    const excel = el("button", {type:"button", clase:"btn-excel-exp", texto:"Descargar Excel",
+      onclick: () => descargarPlanes(filasFiltradasPlanes(base, d), d)});
+    const barra = el("div", {clase:"exp-barra"}, [
+      el("div", {clase:"exp-fila"}, [texto, excel]),
+      el("div", {clase:"exp-fila exp-filtros"}, [...desplegables, limpiar]),
+    ]);
+    pintarResultadoPlanes(resultado, base, d);
+
+    const nAnterior = base.filter(f => f.version_anterior === "Sí").length;
+    const nSinVigente = base.filter(f => f.atributo_vigente === "No").length;
+    const avisoVersion = nAnterior || nSinVigente ? el("div", {clase:"avisos aviso-red", texto: [
+      nAnterior ? nAnterior + " plan(es) siguen ligados a una versión anterior (inactiva) de su atributo; se muestran con la versión vigente." : "",
+      nSinVigente ? nSinVigente + " plan(es) activos son de atributos dados de baja (sin versión vigente); se marcan en la tabla." : "",
+    ].filter(Boolean).join(" ") + " Ver el detalle de cada plan."}) : null;
+
+    if (d){
+      const avisoConf = esConf(d) ? el("div", {clase:"avisos aviso-conf", texto:
+        "Dominio confidencial: la «Fuente oficial / sistema» de sus planes no se publica en el sitio."}) : null;
+      return [cabeceraDominio(d), avisoConf, base.length ? kpisPlanes(resumenPlanes(base), false) : null, avisoVersion,
+        base.length ? [barra, resultado] : el("div", {clase:"vacio", texto:"Este dominio no tiene planes de remediación activos."})];
+    }
+    const cab = el("div", {clase:"cabecera"}, [el("div", null, [el("h2", {texto:"Planes de remediación"}),
+      el("div", {clase:"sub", texto:"Planes activos de todos los dominios (hoja PlanDeRemediacion). Elige un dominio para ver solo los suyos."})])]);
+    if (!base.length) return [cab, el("div", {clase:"vacio", texto:"No hay planes de remediación activos."})];
+    const verDom = cod => { estado.dominio = cod; actualizar(); };
+    const graficos = tarjeta("Todos los planes activos", base.length, el("div", {clase:"dos-columnas"}, [
+      graficoConteo("Estado", base, "estado", e => ordenEstadoPlan({estado:e})),
+      graficoConteo("Dimensión", base, "dimension"),
+      graficoConteo("Dominio", base, "dominio", null, verDom),
+      graficoConteo("Avance", base, "rango_avance", r => RANGOS_AVANCE.indexOf(r)),
+    ]));
+    return [cab, kpisPlanes(resumenPlanes(base), true), avisoVersion, graficos,
+      tarjeta("Planes", null, [barra, resultado])];
+  }
+
+  function pintarResultadoPlanes(cont, base, d){
+    const filas = filasFiltradasPlanes(base, d);
+    const paginas = Math.max(1, Math.ceil(filas.length / PLN.porPagina));
+    PLN.pagina = Math.min(PLN.pagina, paginas - 1);
+    const desde = PLN.pagina * PLN.porPagina, pagina = filas.slice(desde, desde + PLN.porPagina);
+    const nav = el("div", {clase:"exp-nav"}, [
+      el("span", {clase:"nota", texto: filas.length + " de " + base.length + " planes" +
+        (filas.length ? " · mostrando " + (desde + 1) + "–" + (desde + pagina.length) : "")}),
+      paginas > 1 ? el("span", {clase:"exp-paginas"}, [
+        el("button", {type:"button", texto:"‹ Anterior", disabled: PLN.pagina === 0 ? "" : null,
+          onclick: () => { PLN.pagina--; pintarResultadoPlanes(cont, base, d); }}),
+        el("span", {texto:"Página " + (PLN.pagina + 1) + " de " + paginas}),
+        el("button", {type:"button", texto:"Siguiente ›", disabled: PLN.pagina >= paginas - 1 ? "" : null,
+          onclick: () => { PLN.pagina++; pintarResultadoPlanes(cont, base, d); }}),
+      ]) : null,
+    ]);
+    if (!filas.length){ cont.replaceChildren(nav, el("div", {clase:"vacio", texto:"Ningún plan cumple los filtros."})); return; }
+    const cols = [d ? null : "Dominio", "Atributo", "Problema", "Dimensión", "Estado", "Avance", "Priorización",
+      "F. identificación", "F. definitiva", "Detalle"].filter(Boolean);
+    const filasHtml = [];
+    for (const f of pagina){
+      filasHtml.push(el("tr", null, [
+        d ? null : el("td", {texto:f.dominio}),
+        el("td", null, [f.atributo_vigente === "No"
+          ? el("span", null, [f.atributo, el("span", {clase:"estado neutro marca-vencido", title:"El atributo no tiene versión vigente"},
+              [el("span", {clase:"icono", "aria-hidden":"true", texto:"⊘"}), "Dado de baja"])])
+          : el("button", {type:"button", clase:"enlace-atributo", texto:f.atributo,
+              title:"Ver el atributo en «Atributos y fuentes»", onclick: () => irA("atributos", f.dominio, f.nombre_atributo)}),
+          el("div", {clase:"nota", texto: f.nombre_atributo || ""})]),
+        el("td", {texto: v(f.id_problema)}), el("td", {texto: v(f.dimension)}), el("td", null, chipEstadoPlan(f.estado)),
+        el("td", null, celdaAvance(f.avance_num)), el("td", {texto: v(f.priorizacion)}),
+        el("td", {texto: v(f.fecha_identificacion)}),
+        el("td", null, [v(f.fecha_finalizacion_definitiva), f.vencido === "Sí"
+          ? el("span", {clase:"estado no marca-vencido", title:"Fecha definitiva anterior a hoy y el plan no está finalizado"},
+              [el("span", {clase:"icono", "aria-hidden":"true", texto:"⚠"}), "Vencido"]) : null]),
+        el("td", null, el("button", {type:"button", clase:"btn-detalle btn-fila", "aria-expanded":"false", "data-etiqueta":"Ver detalle",
+          texto:"Ver detalle", onclick: e => alternarDetalle(e.currentTarget)})),
+      ].filter(Boolean)));
+      const campo = (etq, valor, ancho) => el("section", {clase: ancho ? "ancho" : null}, [el("h6", {texto:etq}), el("p", {texto: v(valor)})]);
+      filasHtml.push(el("tr", {clase:"detalle", hidden:""}, el("td", {colspan:String(cols.length)},
+        el("div", {clase:"det-fuente det-plan"}, [
+          campo("Categoría", f.categoria), campo("Fuente oficial / sistema", f.fuente_oficial_sistema),
+          campo("Tipo de plan", f.tipo_plan), campo("Categoría del plan", f.categoria_plan),
+          campo("Subcategoría del plan", f.subcategoria_plan), campo("Persona responsable", f.persona_responsable),
+          campo("Fecha de última modificación", f.fecha_ultima_modificacion), campo("SIRO", f.siro),
+          f.version_anterior === "Sí" ? campo("Versión del atributo",
+            "El plan está ligado a la versión " + (f.version_ligada || "?") + " (inactiva); la versión vigente es la " +
+            (f.version_vigente || "?") + ".", true) : null,
+          f.atributo_vigente === "No" ? campo("Versión del atributo",
+            "El atributo ya no tiene una versión vigente (fue dado de baja), pero el plan sigue activo. El plan está ligado " +
+            "a la versión " + (f.version_ligada || "?") + ".", true) : null,
+          campo("Descripción de la causa raíz", f.descripcion_causa_raiz, true),
+          campo("Acciones de corto plazo", f.acciones_corto_plazo, true),
+          campo("Acciones definitivas", f.acciones_definitivo, true),
+          campo("Dependencias", f.dependencias, true), campo("Observación", f.observacion, true),
+        ]))));
+    }
+    cont.replaceChildren(nav, el("div", {clase:"tabla-wrap exp-tabla"}, el("table", {clase:"tabla-fuentes tabla-planes"}, [
+      el("thead", null, el("tr", null, cols.map(c => el("th", {texto:c})))),
+      el("tbody", null, filasHtml),
+    ])));
+  }
+
+  function descargarPlanes(filas, d){
+    const cols = [["dominio","Dominio",10], ["nombre_dominio","Nombre del dominio",28], ["atributo","Código del atributo",14],
+      ["nombre_atributo","Nombre del atributo",32], ["id_problema","Id del problema",12], ["dimension","Dimensión",14],
+      ["categoria","Categoría",30,1], ["fuente_oficial_sistema","Fuente oficial / sistema",26,1], ["tipo_plan","Tipo de plan",14],
+      ["categoria_plan","Categoría del plan",24], ["subcategoria_plan","Subcategoría del plan",24], ["priorizacion","Priorización",11],
+      ["estado","Estado",13], ["avance_num","Avance (%)",10], ["vencido","Vencido",9],
+      ["fecha_identificacion","Fecha de identificación",13], ["fecha_finalizacion_definitiva","Fecha definitiva",13],
+      ["fecha_ultima_modificacion","Fecha última modificación",13], ["persona_responsable","Persona responsable",28,1],
+      ["descripcion_causa_raiz","Descripción de la causa raíz",60,1], ["acciones_corto_plazo","Acciones de corto plazo",60,1],
+      ["acciones_definitivo","Acciones definitivas",60,1], ["dependencias","Dependencias",40,1], ["observacion","Observación",40,1],
+      ["siro","SIRO",12], ["version_anterior","Ligado a versión anterior del atributo",14],
+      ["atributo_vigente","Atributo con versión vigente",12]];
+    const etiquetasFiltro = Object.fromEntries(filtrosPlanes(d ? FILAS_PLN.filter(f => f.dominio === d.codigo) : FILAS_PLN, !d)
+      .map(f => [f.campo, f]));
+    const aplicados = Object.entries(PLN.sel).filter(([c, s]) => s.size && !(d && c === "dominio")).map(([c, s]) => {
+      const def = etiquetasFiltro[c];
+      return {campo: def ? def.titulo : c, valor: [...s].map(x => ((def && def.opciones.find(o => o.valor === x)) || {etiqueta:x}).etiqueta).join(", ")};
+    });
+    const generado = (document.querySelector(".marca small") || {}).textContent || "";
+    const conf = filas.filter(f => esConf(f._d)).length;
+    const hojas = [
+      {nombre:"Planes", columnas: cols, filas: filas.map(f => ({...f, avance_num: f.avance_num === null ? "" : f.avance_num}))},
+      {nombre:"Filtros", columnas:[["campo","Dato",28], ["valor","Valor",80,1]], filas: [
+        {campo:"Dominio", valor: d ? d.codigo + " · " + d.nombre : "Todos"},
+        {campo:"Texto buscado", valor: PLN.texto || "(sin texto)"}, ...aplicados,
+        {campo:"Planes", valor: filas.length},
+        conf ? {campo:"Dominios confidenciales", valor: conf + " plan(es) de dominios confidenciales: sin «Fuente oficial / sistema»."} : null,
+        {campo:"Vencido", valor:"Fecha definitiva anterior a la fecha de descarga y estado distinto de Finalizado."},
+        {campo:"Sitio", valor: generado}, {campo:"Descargado", valor: new Date().toLocaleString("es")},
+      ].filter(Boolean)},
+    ];
+    const {blob, recortes} = libroXlsx(hojas);
+    const t = new Date(), dos = n => String(n).padStart(2, "0");
+    bajarArchivo(blob, "planes_remediacion_" + (d ? d.codigo + "_" : "") + t.getFullYear() + dos(t.getMonth() + 1) + dos(t.getDate()) +
+      "_" + dos(t.getHours()) + dos(t.getMinutes()) + ".xlsx");
+    if (recortes) alert(recortes + " celda(s) superaban el límite de Excel (32.767 caracteres) y se recortaron.");
+  }
+
   function pintarContenido(){
     const main = document.getElementById("contenido");
     const d = estado.dominio ? porCodigo.get(estado.dominio) : null;
@@ -2374,6 +2696,7 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
     else if (estado.seccion === "indicadores") nodos = vistaIndicadores(d);
     else if (estado.seccion === "explorador") nodos = vistaExplorador(d);
     else if (estado.seccion === "terminos") nodos = vistaTerminos(d);
+    else if (estado.seccion === "planes") nodos = vistaPlanes(d);
     else if (!d) nodos = vistaResumen();
     else if (estado.seccion === "atributos") nodos = vistaAtributos(d);
     else if (estado.seccion === "investigacion") nodos = vistaInvestigacion(d);

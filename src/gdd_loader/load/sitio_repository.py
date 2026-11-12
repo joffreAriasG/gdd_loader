@@ -108,6 +108,48 @@ SQL_INVESTIGACION = text("""
 # Catalogo de roles (indicador "estructura completa": roles requeridos por id, ver sitio_dominios).
 SQL_ROLES = text("SELECT id, nombre_rol FROM gdd.cat_rol")
 
+# Planes de remediacion activos (hoja PlanDeRemediacion), catalogos resueltos a texto. El dominio sale
+# del atributo (igual que el resto del sitio).
+# OJO (hallazgo 2026-11-12): el merge identifica el plan por (codigo_dominio_atributo, id_problema) y no
+# cambia id_atributo al actualizar; cuando el atributo se REEMPLAZA (version nueva), el plan sigue ligado
+# a la version anterior (inactiva). Por eso el plan se une a la version ACTIVA del mismo atributo
+# (mismo dominio y codigo) y se informa la version ligada (version_ligada / version_ligada_activa).
+# OUTER APPLY (no CROSS): un plan activo cuyo atributo ya no tiene ninguna version activa (dado de baja sin
+# que el plan se diera de baja) NO se pierde en silencio: llega con atributo_vigente = 0 y se cuenta.
+SQL_PLANES = text("""
+    SELECT d.codigo_dominio,
+           COALESCE(a.codigo_atributo, av.codigo_atributo) AS codigo_atributo,
+           COALESCE(a.nombre_atributo, av.nombre_atributo) AS nombre_atributo,
+           p.id_problema,
+           av.version AS version_ligada,
+           CASE WHEN av.activo = 1 THEN 1 ELSE 0 END AS version_ligada_activa,
+           a.version AS version_vigente,
+           CASE WHEN a.id IS NULL THEN 0 ELSE 1 END AS atributo_vigente,
+           td.nombre_tipo_dimension      AS dimension,
+           p.categoria, p.fuente_oficial_sistema,
+           tp.nombre_tipo_plan           AS tipo_plan,
+           cp.nombre_categoria_plan      AS categoria_plan,
+           sc.nombre_sub_categoria_plan  AS subcategoria_plan,
+           p.priorizacion,
+           ep.nombre_estado_plan         AS estado,
+           p.fecha_identificacion, p.fecha_finalizacion_definitiva, p.fecha_ultima_modificacion,
+           p.avance, p.descripcion_causa_raiz, p.persona_responsable, p.dependencias, p.observacion,
+           p.acciones_corto_plazo, p.acciones_definitivo, p.siro
+    FROM gdd.plan_remediacion p
+    JOIN gdd.atributo av                    ON av.id = p.id_atributo          -- version a la que apunta el plan
+    OUTER APPLY (SELECT TOP 1 x.id, x.codigo_atributo, x.nombre_atributo, x.version
+                 FROM gdd.atributo x
+                 WHERE x.id_dominio = av.id_dominio AND x.codigo_atributo = av.codigo_atributo AND x.activo = 1
+                 ORDER BY x.id DESC) a                                         -- version activa (NULL si no hay)
+    JOIN gdd.dominio_dato d                 ON d.id = av.id_dominio
+    LEFT JOIN gdd.cat_tipo_dimension td     ON td.id = p.id_dimension
+    LEFT JOIN gdd.cat_tipo_plan tp          ON tp.id = p.id_tipo_plan
+    LEFT JOIN gdd.cat_categoria_plan cp     ON cp.id = p.id_categoria_plan
+    LEFT JOIN gdd.cat_sub_categoria_plan sc ON sc.id = p.id_sub_categoria_plan
+    LEFT JOIN gdd.cat_estado_plan ep        ON ep.id = p.id_estado_plan
+    WHERE p.activo = 1
+""")
+
 # Catalogo de clasificaciones de investigacion: la seccion Investigacion muestra TODAS (sin Termino),
 # en el orden del catalogo, aunque no tengan registros (p. ej. "Actualización de datos").
 SQL_CLASIFICACIONES = text("SELECT id, nombre_clasificacion FROM gdd.cat_clasificacion_investigacion")
@@ -122,6 +164,7 @@ CONSULTAS = {
     "fuentes_oficiales": SQL_FUENTES_OFICIALES,
     "fuentes_consumo": SQL_FUENTES_CONSUMO,
     "investigacion": SQL_INVESTIGACION,
+    "planes": SQL_PLANES,
 }
 
 

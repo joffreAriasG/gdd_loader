@@ -78,7 +78,7 @@ def test_agrupa_por_dominio_y_ordena():
     assert [a["codigo_atributo"] for a in ads["atributos"]] == ["2", "10"]
     # el unico registro de investigacion de ADS es un "Termino": cuenta como termino, no como investigacion
     assert ads["conteos"] == {"estructura": 1, "respaldos": 1, "atributos": 2, "fuentes_oficiales": 2,
-                              "fuentes_consumo": 1, "investigacion": 0, "terminos": 1}
+                              "fuentes_consumo": 1, "investigacion": 0, "terminos": 1, "planes": 0}
     assert m["resumen"]["n_dominios_con_atributos"] == 2
     assert m["resumen"]["totales"]["atributos"] == 3
     assert m["resumen"]["huerfanos"] == {}
@@ -346,8 +346,8 @@ def test_leer_todo_ejecuta_una_consulta_por_entidad():
     conn.execute.side_effect = lambda sql: columna if sql is sitio_repository.SQL_TIENE_ESTADO_VIGENCIA else [fila]
     datos = sitio_repository.leer_todo(conn)
     assert set(datos) == {"dominios", "roles", "clasificaciones", "responsables", "respaldos", "atributos",
-                          "fuentes_oficiales", "fuentes_consumo", "investigacion"}
-    assert conn.execute.call_count == 10                # comprobacion de la columna + 9 entidades
+                          "fuentes_oficiales", "fuentes_consumo", "investigacion", "planes"}
+    assert conn.execute.call_count == 11                # comprobacion de la columna + 10 entidades
     assert datos["dominios"] == [{"codigo_dominio": "ADS"}]
     assert "estado_vigencia" in str(sitio_repository.SQL_DOMINIOS)
 
@@ -532,6 +532,98 @@ def test_investigacion_en_tarjetas_con_todas_las_secciones():
     assert "filtroInvestigacion" in html
 
 
+# --- v0.14.0: planes de remediacion ---
+
+def _plan(cod, cod_attr, problema, estado="Alertado", fecha_def=None, avance=0, vigente=True, fuente="SISTEMA_X"):
+    return {"codigo_dominio": cod, "codigo_atributo": cod_attr, "nombre_atributo": f"Atributo {cod_attr}", "id_problema": problema,
+            "version_ligada": "1" if vigente else "1", "version_ligada_activa": 1 if vigente else 0, "version_vigente": "1" if vigente else "2",
+            "dimension": "Completitud", "categoria": "Cat", "fuente_oficial_sistema": fuente, "tipo_plan": "Tecnológico",
+            "categoria_plan": "Procesos", "subcategoria_plan": "Procesos", "priorizacion": "1", "estado": estado,
+            "fecha_identificacion": datetime.date(2026, 1, 5), "fecha_finalizacion_definitiva": fecha_def,
+            "fecha_ultima_modificacion": None, "avance": avance, "descripcion_causa_raiz": "Causa",
+            "persona_responsable": "Persona Plan", "dependencias": None, "observacion": None,
+            "acciones_corto_plazo": "Corto", "acciones_definitivo": "Definitivo", "siro": None}
+
+
+def _datos_planes():
+    dom = lambda cod, estado: {**_dom(cod), "estado_vigencia": estado}
+    return _datos(
+        dominios=[dom("ADS", "Activo"), dom("CLI", "Confidencial"), dom("OLD", "Inactivo")],
+        planes=[_plan("ADS", 10, "PR2", "Finalizado", avance=100),
+                _plan("ADS", 2, "PR1", "En proceso", datetime.date(2026, 3, 1), 50),
+                _plan("ADS", 2, "PR3", "Alertado", None, 0, vigente=False),
+                _plan("CLI", 1, "PR1", fuente="SISTEMA_SECRETO"),
+                _plan("OLD", 1, "PR1"), _plan("ZZZ", 1, "PR1")])
+
+
+def test_planes_en_el_modelo_por_dominio_y_ordenados_por_estado():
+    m = construir_modelo(_datos_planes())
+    ads, cli = m["dominios"]
+    assert [(p["codigo_atributo"], p["id_problema"], p["estado"]) for p in ads["planes"]] == [
+        ("2", "PR3", "Alertado"), ("2", "PR1", "En proceso"), ("10", "PR2", "Finalizado")]
+    assert ads["conteos"]["planes"] == 3 and m["resumen"]["totales"]["planes"] == 4
+    assert ads["planes"][1]["fecha_finalizacion_definitiva"] == "2026-03-01" and ads["planes"][1]["avance"] == "50"
+    assert m["resumen"]["planes_version_anterior"] == 1
+    r = m["resumen"]
+    assert r["excluidos_inactivos"]["planes"] == 1 and r["huerfanos"]["planes"] == 1      # OLD inactivo, ZZZ sin dominio
+
+
+def test_planes_de_dominio_confidencial_sin_fuente_oficial_sistema():
+    m = construir_modelo(_datos_planes())
+    cli = m["dominios"][1]
+    assert cli["estado_vigencia"] == "Confidencial" and len(cli["planes"]) == 1
+    assert "fuente_oficial_sistema" not in cli["planes"][0]
+    assert m["dominios"][0]["planes"][0]["fuente_oficial_sistema"] == "SISTEMA_X"           # Activo: completo
+    for html in [generar_html(m, "x")] + list(generar_sitio(m, "x").values()):
+        assert "SISTEMA_SECRETO" not in json.dumps(_modelo_del_html(html), ensure_ascii=False)
+
+
+def test_pagina_de_planes_lleva_los_planes_y_las_demas_no():
+    paginas = generar_sitio(construir_modelo(_datos_planes()), "x")
+    datos = {a: _modelo_del_html(h) for a, h in paginas.items()}
+    assert sum(len(d["planes"]) for d in datos["planes.html"]["dominios"]) == 4
+    assert all(d["planes"] == [] for a, m in datos.items() if a != "planes.html" for d in m["dominios"])
+    html = paginas["planes.html"]
+    assert '{id:"planes", titulo:"Planes de remediación"}' in html
+    for fn in ("function vistaPlanes", "function pintarResultadoPlanes", "function descargarPlanes", "function construirFilasPlanes"):
+        assert fn in html
+
+
+def test_sql_planes_une_con_la_version_vigente_del_atributo_sin_perder_planes():
+    sql = str(sitio_repository.SQL_PLANES)
+    # OUTER (no CROSS) APPLY: un plan cuyo atributo no tiene version activa no se pierde en silencio
+    assert "OUTER APPLY" in sql and "CROSS APPLY" not in sql and "x.activo = 1" in sql and "WHERE p.activo = 1" in sql
+    assert "version_ligada_activa" in sql and "atributo_vigente" in sql and "d.id = av.id_dominio" in sql
+
+
+def test_planes_sin_atributo_vigente_se_cuentan_y_se_muestran_marcados():
+    datos = _datos_planes()
+    datos["planes"].append({**_plan("ADS", 7, "PR9"), "version_ligada_activa": 0, "atributo_vigente": 0, "version_vigente": None})
+    datos["planes"] = [{**p, "atributo_vigente": p.get("atributo_vigente", 1)} for p in datos["planes"]]
+    m = construir_modelo(datos)
+    r = m["resumen"]
+    assert r["planes_sin_atributo_vigente"] == 1
+    assert r["planes_version_anterior"] == 1                       # el de version anterior CON version vigente, no el dado de baja
+    assert any(p["id_problema"] == "PR9" for p in m["dominios"][0]["planes"])
+    html = generar_html(m, "x")
+    assert 'f.atributo_vigente === "No"' in html and '"Dado de baja"' in html
+
+
+def test_conteos_de_inactivos_no_se_publican():
+    m = construir_modelo(_datos_planes())
+    assert m["resumen"]["n_inactivos"] == 1 and m["resumen"]["excluidos_inactivos"]   # el log de sitio_cli los usa
+    for html in [generar_html(m, "x")] + list(generar_sitio(m, "x").values()):
+        resumen = _modelo_del_html(html)["resumen"]
+        assert "n_inactivos" not in resumen and "excluidos_inactivos" not in resumen
+
+
+def test_filtros_de_planes_no_se_podan_y_el_de_dominio_no_aplica_en_un_dominio():
+    html = generar_html(construir_modelo(_datos_planes()), "x")
+    assert "PLN.sel[campo].delete" not in html                      # no se pierden al cambiar de dominio
+    assert 's.size && !(d && c === "dominio")' in html              # el filtro oculto de "Todos" no vacia la tabla
+    assert "filasFiltradasPlanes(base, d)" in html
+
+
 # --- sitio de varias paginas (v0.13.0) ---
 
 def test_datos_comprimidos_ida_y_vuelta_y_deterministas():
@@ -545,7 +637,7 @@ def test_datos_comprimidos_ida_y_vuelta_y_deterministas():
 def test_generar_sitio_una_pagina_por_seccion_con_index():
     paginas = generar_sitio(construir_modelo(_datos(), _grafo_sintetico()), "2026-11-11 10:00", "Glosario")
     assert list(paginas) == ["index.html", "atributos.html", "explorador.html", "investigacion.html",
-                             "terminos.html", "relaciones.html", "indicadores.html"]
+                             "terminos.html", "relaciones.html", "indicadores.html", "planes.html"]
     for seccion, archivo in PAGINAS.items():
         html = paginas[archivo]
         assert _config_del_html(html) == {"seccion": seccion, "paginas": PAGINAS}
@@ -566,7 +658,8 @@ def test_cada_pagina_lleva_solo_los_datos_que_usa():
     modelo = construir_modelo(_datos(), _grafo_sintetico())
     paginas = {s: _modelo_del_html(h) for s, h in zip(PAGINAS, generar_sitio(modelo, "x").values())}
     ads = {s: next(d for d in m["dominios"] if d["codigo"] == "ADS") for s, m in paginas.items()}
-    resumen = json.loads(json.dumps(modelo["resumen"]))
+    resumen = {k: v for k, v in json.loads(json.dumps(modelo["resumen"])).items()
+               if k not in ("n_inactivos", "excluidos_inactivos")}            # conteos de Inactivos: no se publican
     for s in PAGINAS:   # menu lateral y tabla resumen en todas
         assert ads[s]["nombre"] and ads[s]["info"] and ads[s]["conteos"]["atributos"] == 2
         assert paginas[s]["resumen"] == resumen

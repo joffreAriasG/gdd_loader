@@ -274,7 +274,7 @@ vis-network 9.1.9 va incrustado (`exportar/recursos`, licencia MIT).
 
 ## Sitio de consulta por dominio (v0.10.0)
 
-HTML autocontenido (sin internet ni servidor) con menú lateral y siete secciones.
+HTML autocontenido (sin internet ni servidor) con menú lateral y ocho secciones.
 **Solo lectura**: lee `gdd.*` (registros activos); no usa staging.
 
 1. **Dominio y estructura**: datos del dominio, responsables (hoja Estructura) y respaldos.
@@ -300,10 +300,15 @@ HTML autocontenido (sin internet ni servidor) con menú lateral y siete seccione
    fuente oficial resta 5 si es crítico y está marcado en Estructura, 3 si solo es crítico y 1 en otro
    caso; mínimo 0), atributos críticos / no críticos con y sin fuente, estructura completa (roles 1 a 4),
    fuentes de consumo, respaldos, glosario y vínculos. Cada gráfico tiene su vista de tabla.
+8. **Planes de remediación** (v0.14.0): planes activos (`gdd.plan_remediacion`). Por dominio, tabla con fila
+   desplegable (causa raíz, acciones, dependencias, observación, responsable, SIRO); con "Todos", indicadores
+   (total, avance promedio, finalizados, vencidos) y gráficos por estado, dimensión, dominio y avance, más la
+   tabla de todos los planes. Filtros de selección múltiple y texto, y descarga a Excel. Cada plan se muestra
+   con la versión vigente de su atributo; en un dominio Confidencial no se publica "Fuente oficial / sistema".
 
 `python -m gdd_loader.sitio_cli --salida "C:\ruta\carpeta"` genera la carpeta `sitio_dominios_AAAAMMDD_HHMM\`
 (v0.13.0) con `index.html` (Dominio y estructura) y una página por sección (`atributos.html`, `explorador.html`,
-`investigacion.html`, `terminos.html`, `relaciones.html`, `indicadores.html`). El diseño es el mismo; el menú
+`investigacion.html`, `terminos.html`, `relaciones.html`, `indicadores.html`, `planes.html`). El diseño es el mismo; el menú
 lateral enlaza las páginas y conserva el dominio elegido. Cada página es autocontenida y lleva solo los datos que
 usa, comprimidos (gzip + base64, unas 9 veces menos); el navegador los descomprime al abrirla (Edge o Chrome
 recientes). Así cada archivo queda muy por debajo del límite de 10 MB por archivo de SharePoint: se sube la
