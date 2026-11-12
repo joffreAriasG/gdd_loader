@@ -1000,7 +1000,7 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
     "Publique el archivo único «" + ARCHIVO_UNICO + "» (todas las secciones en una sola página) o abra la sección desde la biblioteca.";
   function irA(seccion, dominio, filtroAtributo){
     if (MULTI && seccion !== estado.seccion){
-      if (AISLADO){ avisar("No se puede abrir «" + SECCIONES.find(s => s.id === seccion).titulo + "» desde aquí (ver la nota de arriba).",
+      if (AISLADO){ avisar("No se puede abrir «" + SECCIONES.find(s => s.id === seccion).titulo + "» desde aquí (ver la nota de esta página).",
                            "navegacion"); return; }
       location.href = CONFIG.paginas[seccion] + hashDe(seccion, dominio, filtroAtributo);
       return;
