@@ -80,3 +80,32 @@ def test_mover_planes_remediacion_religa_solo_los_activos():
         "WHERE id_atributo = :anterior AND activo = 1"
     )
     assert parametros == {"nuevo": 321, "anterior": 100}
+
+
+# --- GDD-01 (v0.14.3): responsables con la plaza repetida ---
+
+
+def test_dominio_responsable_existentes_una_fila_por_plaza_recortada():
+    """Con duplicados activos, compara contra el mas reciente (rn = 1) y la
+    clave se recorta (SQL Server ignora espacios finales al comparar; Python no)."""
+    conn = MagicMock()
+    fila = MagicMock(id=63, codigo_plaza="41376 ")
+    conn.execute.return_value.all.return_value = [fila]
+
+    existentes = repo.dominio_responsable_existentes(conn, 49)
+
+    assert list(existentes) == ["41376"]
+    assert existentes["41376"].id == 63
+    sql, parametros = _sentencias(conn)[0]
+    assert "ORDER BY fecha_aprobada DESC, id DESC" in sql and "rn = 1" in sql
+    assert parametros == {"id_dominio": 49}
+
+
+def test_dominio_responsable_sobrantes_devuelve_los_no_vigentes():
+    conn = MagicMock()
+    conn.execute.return_value.all.return_value = [MagicMock(id=5)]
+
+    assert repo.dominio_responsable_sobrantes(conn, 49) == [5]
+    sql, parametros = _sentencias(conn)[0]
+    assert "ORDER BY fecha_aprobada DESC, id DESC" in sql and "rn > 1" in sql
+    assert parametros == {"id_dominio": 49}

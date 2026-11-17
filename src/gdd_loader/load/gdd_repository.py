@@ -781,12 +781,44 @@ def dominio_responsable_existentes(conn: Connection, id_dominio: int) -> dict[st
     """
     filas = conn.execute(
         text(
-            "SELECT id, codigo_plaza FROM gdd.dominio_responsable "
-            "WHERE id_dominio = :id_dominio AND activo = 1"
+            "SELECT id, codigo_plaza FROM ("
+            "  SELECT id, LTRIM(RTRIM(codigo_plaza)) AS codigo_plaza, "
+            "         ROW_NUMBER() OVER (PARTITION BY LTRIM(RTRIM(codigo_plaza)) "
+            "                            ORDER BY fecha_aprobada DESC, id DESC) AS rn "
+            "  FROM gdd.dominio_responsable "
+            "  WHERE id_dominio = :id_dominio AND activo = 1"
+            ") x WHERE rn = 1"
         ),
         {"id_dominio": id_dominio},
     ).all()
-    return {f.codigo_plaza: ExistenteVersionado(id=f.id, fecha_aprobacion=None) for f in filas}
+    # [v0.14.3, GDD-01] Una fila por plaza (recortada): si hay duplicados
+    # activos, la que se compara es la de fecha_aprobada mas reciente (en
+    # empate, id mayor); las demas las devuelve dominio_responsable_sobrantes.
+    return {
+        f.codigo_plaza.strip(): ExistenteVersionado(id=f.id, fecha_aprobacion=None) for f in filas
+    }
+
+
+def dominio_responsable_sobrantes(conn: Connection, id_dominio: int) -> list[int]:
+    """[v0.14.3, GDD-01] ids de los responsables activos que REPITEN la plaza
+    (recortada) de otro activo del mismo dominio: todos menos el de
+    fecha_aprobada mas reciente (en empate, id mayor), que es el que devuelve
+    `dominio_responsable_existentes`. Antes el merge solo veia una de las
+    filas repetidas y las otras quedaban activas para siempre (caso real de
+    produccion: CND, plaza 41376). El merge las da de baja.
+    """
+    filas = conn.execute(
+        text(
+            "SELECT id FROM ("
+            "  SELECT id, ROW_NUMBER() OVER (PARTITION BY LTRIM(RTRIM(codigo_plaza)) "
+            "                                ORDER BY fecha_aprobada DESC, id DESC) AS rn "
+            "  FROM gdd.dominio_responsable "
+            "  WHERE id_dominio = :id_dominio AND activo = 1"
+            ") x WHERE rn > 1 ORDER BY id"
+        ),
+        {"id_dominio": id_dominio},
+    ).all()
+    return [f.id for f in filas]
 
 
 def insertar_dominio_responsable(conn: Connection, campos: dict) -> int:

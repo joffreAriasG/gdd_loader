@@ -970,6 +970,7 @@ def _parchear_repo_estructura(monkeypatch, *, id_dominio=99, existentes=None):
     mock_repo.resolver_dominio_id.return_value = id_dominio
     mock_repo.resolver_catalogo_controlado.return_value = 7
     mock_repo.dominio_responsable_existentes.return_value = existentes or {}
+    mock_repo.dominio_responsable_sobrantes.return_value = []
     mock_repo.insertar_dominio_responsable.return_value = 555
     mock_repo.campos_actuales.return_value = {}
     monkeypatch.setattr(carga_gdd, "repo", mock_repo)
@@ -1116,6 +1117,74 @@ def test_estructura_fila_sin_codigo_plaza_aborta_antes_de_tocar_bd(monkeypatch):
 
     assert not resultado.ok
     mock_repo.resolver_dominio_id.assert_not_called()
+
+
+def test_estructura_plaza_repetida_con_otra_persona_aborta_sin_tocar_bd(monkeypatch):
+    """Regresion GDD-01 (v0.14.3, casos reales ATH/GCR/GDC/SMC): el Excel trae
+    la misma plaza dos veces con personas distintas. Antes el merge guardaba
+    la ultima fila y descartaba la otra sin avisar; ahora es un error claro
+    (decision del usuario: una plaza tiene un solo responsable)."""
+    staging_repo = MagicMock()
+    staging_repo.leer.return_value = [
+        _fila_estructura(),
+        _fila_estructura(nombre_responsable="Otra Persona"),
+        _fila_estructura(codigo_plaza="2000"),
+    ]
+    mock_repo = _parchear_repo_estructura(monkeypatch)
+    engine = MagicMock()
+
+    resultado = carga_gdd.ejecutar_merge_estructura_dominio(engine, staging_repo, "ADS")
+
+    assert not resultado.ok
+    assert "codigo_plaza 1000921" in resultado.error
+    assert "Otra Persona" not in resultado.error  # sin nombres de personas en el mensaje
+    mock_repo.resolver_dominio_id.assert_not_called()
+    mock_repo.insertar_dominio_responsable.assert_not_called()
+
+
+def test_estructura_fila_repetida_identica_se_toma_una_vez(monkeypatch):
+    """Caso real TRA: la misma fila dos veces (misma persona y datos) no es un
+    error; se inserta una sola vez."""
+    staging_repo = MagicMock()
+    staging_repo.leer.return_value = [_fila_estructura(), _fila_estructura()]
+    mock_repo = _parchear_repo_estructura(monkeypatch)
+    engine = MagicMock()
+
+    resultado = carga_gdd.ejecutar_merge_estructura_dominio(engine, staging_repo, "ADS")
+
+    assert resultado.ok, resultado.error
+    assert resultado.insertadas == 1
+    mock_repo.insertar_dominio_responsable.assert_called_once()
+
+
+def test_estructura_plaza_repetida_en_gdd_da_de_baja_las_sobrantes(monkeypatch):
+    """Regresion GDD-01 (caso real CND, plaza 41376, ids 5 y 63): gdd ya tiene
+    dos responsables activos con la misma plaza. El merge compara contra el
+    mas reciente (63) y da de baja el otro (5); antes el 5 quedaba activo
+    para siempre."""
+    staging_repo = MagicMock()
+    staging_repo.leer.return_value = [_fila_estructura(codigo_plaza="41376")]
+    existentes = {"41376": ExistenteVersionado(id=63, fecha_aprobacion=None)}
+    mock_repo = _parchear_repo_estructura(monkeypatch, existentes=existentes)
+    mock_repo.dominio_responsable_sobrantes.return_value = [5]
+    mock_repo.campos_actuales.return_value = {
+        "id_rol": 7,
+        "area": "Tribu Producto Banca Relacional",
+        "nombre_plaza": "Dueño de Producto Sr",
+        "nombre_responsable": "Xavier Santiago Cabrera Rivadeneira",
+        "fecha_aprobada": datetime.date(2024, 5, 10),
+    }
+    engine = MagicMock()
+
+    resultado = carga_gdd.ejecutar_merge_estructura_dominio(engine, staging_repo, "ADS")
+
+    assert resultado.ok, resultado.error
+    assert resultado.eliminadas == 1
+    assert resultado.sin_cambios == 1
+    conn_usada = engine.begin.return_value.__enter__.return_value
+    mock_repo.dominio_responsable_sobrantes.assert_called_once_with(conn_usada, 99)
+    mock_repo.eliminar_dominio_responsable.assert_called_once_with(conn_usada, 5)
+    mock_repo.insertar_dominio_responsable.assert_not_called()
 
 
 # --- ejecutar_merge_respaldos_dominio: funcion aparte, transaccion aparte

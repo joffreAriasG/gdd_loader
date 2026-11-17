@@ -889,6 +889,32 @@ def _resolver_campos_estructura(conn, id_dominio: int, pendiente: EstructuraPend
     }
 
 
+def _entrantes_estructura(codigo_dominio: str, pendientes: list[EstructuraPendiente]) -> dict:
+    """[v0.14.3, GDD-01] Arma las filas del Excel por codigo_plaza (la clave).
+    Decision del usuario (2026-11-17): una plaza tiene UN solo responsable en
+    el dominio. Fila repetida identica: se toma una vez. Misma plaza con otros
+    datos (otra persona, rol, etc.): error que aborta la Estructura del
+    dominio -- antes el merge se quedaba con la ultima fila y descartaba las
+    otras sin avisar (casos reales de produccion: ATH, GCR, GDC y SMC).
+    El mensaje lleva solo los codigos de plaza (no nombres de personas).
+    """
+    entrantes: dict = {}
+    repetidas: list[str] = []
+    for p in pendientes:
+        previa = entrantes.get(p.codigo_plaza)
+        if previa is not None and previa[0] != p and p.codigo_plaza not in repetidas:
+            repetidas.append(p.codigo_plaza)
+        if previa is None:
+            entrantes[p.codigo_plaza] = (p, None)
+    if repetidas:
+        raise ValueError(
+            f"Estructura {codigo_dominio}: el codigo_plaza {', '.join(repetidas)} aparece en "
+            "mas de una fila con datos distintos. Cada plaza tiene un solo responsable: "
+            "dejar una sola fila por plaza en la hoja Estructura y volver a cargar."
+        )
+    return entrantes
+
+
 def ejecutar_merge_estructura_dominio(
     engine: Engine, staging_repo: StagingRepository, codigo_dominio: str
 ) -> ResultadoMergeEstructura:
@@ -918,12 +944,25 @@ def ejecutar_merge_estructura_dominio(
             "staging.estructura", "codigo_dominio", codigo_dominio
         )
         pendientes = mapear_estructura(filas_staging)
+        entrantes = _entrantes_estructura(codigo_dominio, pendientes)
 
         with engine.begin() as conn:
             id_dominio = repo.resolver_dominio_id(conn, codigo_dominio)
 
+            # [v0.14.3, GDD-01] Plazas repetidas que ya estan activas en gdd:
+            # se conserva la mas reciente (la que devuelve *_existentes) y las
+            # demas se dan de baja aqui. Antes quedaban activas para siempre.
+            sobrantes = repo.dominio_responsable_sobrantes(conn, id_dominio)
+            for id_sobrante in sobrantes:
+                repo.eliminar_dominio_responsable(conn, id_sobrante)
+                resultado.eliminadas += 1
+            if sobrantes:
+                logger.warning(
+                    "Estructura %s: %d responsable(s) activo(s) repetian la plaza de otro y se "
+                    "dieron de baja (ids %s)", codigo_dominio, len(sobrantes), sobrantes,
+                )
+
             existentes = repo.dominio_responsable_existentes(conn, id_dominio)
-            entrantes = {p.codigo_plaza: (p, None) for p in pendientes}
             plan = calcular_plan_merge(existentes, entrantes)
 
             for op in plan:
