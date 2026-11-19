@@ -732,3 +732,30 @@ def test_paginas_excedidas_y_escribir_sitio_sin_sobrescribir(tmp_path):
     with pytest.raises(FileExistsError):
         escribir_sitio(destino, {"index.html": "<p>otro</p>"})
     assert (destino / "index.html").read_text(encoding="utf-8") == "<p>1</p>"
+
+
+# --- v0.16.0 (GDD-05): filtro por servidor de la fuente oficial y vista "Por fuente oficial" ---
+
+def test_explorador_filtro_servidor_y_vista_por_fuente_oficial():
+    html = generar_html(construir_modelo(_datos_vigencia()), "x")
+    assert '["servidor_fo","Servidor (f. oficial)"]' in html                    # filtro en las dos vistas
+    assert "function construirFilasFte" in html and "function descargarFuentesExp" in html
+    for col in ('["f_servidor","Servidor"', '["f_base_datos","Base de datos"', '["f_tabla","Tabla / archivo"',
+                '["f_campo","Campo"', '["f_primaria","Primaria"', '["f_tipo","Tipo de campo"', '["f_longitud","Longitud"',
+                '["f_nulos","Acepta nulos"', '["f_formula","Fórmula de cálculo"', '["f_valores","Valores válidos"'):
+        assert col in html
+    # el atributo cumple el filtro si ALGUNA de sus fuentes esta en el servidor elegido
+    assert "valoresDe(f, c).some(x => s.has(x))" in html
+    # los dominios confidenciales no aportan filas (no traen el detalle de sus fuentes)
+    assert "FILAS_EXP.filter(fa => !esConf(fa._d))" in html
+    assert 'botonVista("fuente", "Por fuente oficial"' in html and 'botonVista("atributo", "Por atributo"' in html
+
+
+def test_explorador_cambio_de_vista_conserva_filtros_y_muestra_selecciones_sin_filas():
+    html = generar_html(construir_modelo(_datos_vigencia()), "x")
+    # cambiar de vista no vuelve a imponer el dominio del menu lateral (revision v0.16.0)
+    assert "if (d && !expCambioVista)" in html and "expCambioVista = true; pintarContenido();" in html
+    # un valor elegido sin filas en la vista actual se dibuja con 0 (se puede desmarcar)
+    assert "for (const valor of EXP.sel[campo]) if (!n.has(valor)) n.set(valor, 0);" in html
+    # el filtrado no recalcula los conteos de los desplegables
+    assert "new Set(camposFiltroExp().map(([c]) => c))" in html and 'new Intl.Collator("es", {numeric:true})' in html

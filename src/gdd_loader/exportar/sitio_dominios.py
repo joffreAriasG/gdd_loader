@@ -10,6 +10,9 @@ servidor) con menu lateral y tres secciones por dominio:
   2b. Explorador de atributos (v0.12.0) -> todos los dominios, filtros combinables,
                                   busqueda de texto, selector de columnas y descarga a
                                   Excel del resultado (se muestra como seccion 3).
+                                  v0.16.0 (GDD-05): filtro "Servidor (f. oficial)" y vista
+                                  "Por fuente oficial" (una fila por servidor / base / tabla /
+                                  campo con sus caracteristicas; sin dominios confidenciales).
   3. Investigacion             -> normas, procesos, proyectos, modelos y demas
                                   registros de la hoja Investigacion (sin los
                                   terminos).
@@ -771,6 +774,12 @@ td.largo{min-width:260px;max-width:520px;white-space:pre-wrap;word-break:break-w
 .btn-excel-exp{background:var(--amarillo);color:var(--marino);border:1px solid var(--amarillo-fuerte);border-radius:8px;
   padding:9px 16px;font:inherit;font-weight:700;cursor:pointer}
 .btn-excel-exp:hover{background:var(--amarillo-fuerte)}
+/* vista del Explorador (v0.16.0): por atributo | por fuente oficial */
+.exp-vista{display:inline-flex;border:1px solid var(--marino);border-radius:8px;overflow:hidden}
+.exp-vista button{background:var(--panel);color:var(--marino);border:0;padding:8px 14px;font:inherit;font-weight:600;cursor:pointer}
+.exp-vista button + button{border-left:1px solid var(--marino)}
+.exp-vista button[aria-pressed="true"]{background:var(--marino);color:#fff}
+.exp-vista button:focus-visible{outline:2px solid var(--amarillo-fuerte);outline-offset:-2px}
 details.filtro{position:relative}
 details.filtro > summary{list-style:none;cursor:pointer;display:inline-flex;align-items:center;gap:6px;padding:6px 12px;
   border:1px solid var(--line);border-radius:999px;background:var(--panel);color:var(--text);font-size:13px;user-select:none}
@@ -2271,10 +2280,28 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
     }
     return Object.fromEntries(Object.entries(m).map(([k, s]) => [k, [...s].sort((a, b) => a.localeCompare(b, "es")).join(" | ")]));
   }
+  // Vista "Por fuente oficial" (v0.16.0, GDD-05): una fila por fuente oficial (servidor / base / tabla / campo)
+  // con sus caracteristicas y los datos del atributo. Los dominios confidenciales no traen el detalle: no aparecen.
+  const COLS_FTE = [   // [clave, encabezado, ancho en Excel, texto largo, visible por defecto]
+    ["dominio","Dominio",10,0,1], ["nombre_dominio","Nombre del dominio",28,0,0], ["codigo","Código",12,0,1],
+    ["nombre_atributo","Atributo",30,0,1], ["criticidad","Criticidad",12,0,0], ["tipo_atributo","Tipo de atributo",16,0,0],
+    ["es_dato_personal","Dato personal",10,0,0],
+    ["f_servidor","Servidor",20,0,1], ["f_base_datos","Base de datos",36,1,1], ["f_tabla","Tabla / archivo",28,1,1],
+    ["f_campo","Campo",26,0,1], ["f_primaria","Primaria",9,0,1], ["f_tipo","Tipo de campo",12,0,1], ["f_longitud","Longitud",9,0,1],
+    ["f_nulos","Acepta nulos",9,0,1], ["f_formula","Fórmula de cálculo",70,1,0], ["f_valores","Valores válidos",50,1,0],
+    ["f_fecha","Fecha de aprobación (fuente)",13,0,0], ["f_version","Versión (fuente)",8,0,0],
+  ];
+  const ORDEN_FTE = ["f_servidor", "f_base_datos", "f_tabla", "f_campo", "codigo"];   // desempate de la vista por fuente
+  const SIN_SERVIDOR = "(sin servidor)";
   const NUMERICAS_EXP = new Set(["n_oficiales", "n_consumo", "resta"]);
   const CLAVE_COLS = "gdd_sitio_explorador_columnas";
-  const EXP = {sel:{}, texto:"", orden:{campo:"codigo", asc:true}, pagina:0, porPagina:100, columnas:null};
-  let FILAS_EXP = null;
+  const CLAVE_COLS_FTE = "gdd_sitio_explorador_columnas_fuente";
+  const EXP = {sel:{}, texto:"", orden:{campo:"codigo", asc:true}, pagina:0, porPagina:100, columnas:null,
+               vista:"atributo", ordenFte:{campo:"f_servidor", asc:true}, columnasFte:null};
+  let FILAS_EXP = null, FILAS_FTE = null;
+  const porFuente = () => EXP.vista === "fuente";
+  let expCambioVista = false;   // al cambiar de vista no se vuelve a imponer el dominio del menu lateral
+  const COLL_EXP = new Intl.Collator("es", {numeric:true});   // un solo collator: ordenar 12 800 filas sin recrearlo
   // Sitio de varias paginas: al ir a un atributo y volver, el Explorador recupera sus
   // filtros (sessionStorage: solo esta pestana; si no esta disponible, se empieza de cero).
   const CLAVE_EXP = "gdd_sitio_explorador_estado";
@@ -2282,7 +2309,7 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
     if (!MULTI) return;
     try {
       sessionStorage.setItem(CLAVE_EXP, JSON.stringify({texto:EXP.texto, orden:EXP.orden, pagina:EXP.pagina,
-        sel:Object.fromEntries(Object.entries(EXP.sel).map(([k, s]) => [k, [...s]]))}));
+        vista:EXP.vista, ordenFte:EXP.ordenFte, sel:Object.fromEntries(Object.entries(EXP.sel).map(([k, s]) => [k, [...s]]))}));
     } catch (e) { /* almacenamiento no disponible */ }
   }
   (function leerEstadoExp(){
@@ -2294,6 +2321,8 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
       EXP.texto = typeof g.texto === "string" ? g.texto : "";
       if (g.orden && typeof g.orden.campo === "string") EXP.orden = {campo:g.orden.campo, asc:!!g.orden.asc};
       EXP.pagina = Number.isInteger(g.pagina) ? g.pagina : 0;
+      if (g.vista === "fuente") EXP.vista = "fuente";
+      if (g.ordenFte && COLS_FTE.some(c => c[0] === g.ordenFte.campo)) EXP.ordenFte = {campo:g.ordenFte.campo, asc:!!g.ordenFte.asc};
     } catch (e) { /* almacenamiento no disponible o dato invalido */ }
   })();
 
@@ -2330,6 +2359,8 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
         fc_clase: unir(fc, n_fc, "clase"), fc_servidor: unir(fc, n_fc, "servidor"), fc_base_datos: unir(fc, n_fc, "base_datos"),
         fc_tabla: unir(fc, n_fc, "tabla"), fc_campo: unir(fc, n_fc, "nombre_campo"),
         resta: restaAtributo(a), ...resp, _a:a, _d:d,
+        // filtro "Servidor (f. oficial)": lista de servidores distintos de sus fuentes oficiales (cumple si tiene alguno)
+        servidor_fo: conf ? (n_fo ? [OCULTO_CONF] : []) : [...new Set(fo.map(f => (f.servidor || "").trim() || SIN_SERVIDOR))],
       };
       fila._buscar = sinTildes([codigo, a.nombre_atributo, a.descripcion_atributo, a.atributo_primario, a.dominio_primario,
         a.tipo_atributo, a.clasificacion_dato_personal, ...Object.values(resp),
@@ -2339,50 +2370,101 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
     }));
   }
 
+  // Una fila por fuente oficial, con los campos del atributo (para que los mismos filtros apliquen) y los de la fuente.
+  function construirFilasFte(){
+    const numero = x => /^\d+(\.\d+)?$/.test(String(x ?? "").trim()) ? Number(String(x).trim()) : (x ?? "");
+    return FILAS_EXP.filter(fa => !esConf(fa._d)).flatMap(fa => fa._a.fuentes_oficiales.map(f => {
+      const servidor = (f.servidor || "").trim() || SIN_SERVIDOR;
+      const fila = {
+        dominio:fa.dominio, nombre_dominio:fa.nombre_dominio, estado_vigencia:fa.estado_vigencia, codigo:fa.codigo,
+        nombre_atributo:fa.nombre_atributo, criticidad:fa.criticidad, tipo_atributo:fa.tipo_atributo,
+        compartido_similar:fa.compartido_similar, estado_vinculo:fa.estado_vinculo, es_dato_personal:fa.es_dato_personal,
+        tiene_consumo:fa.tiene_consumo, estructura:fa.estructura, reporte:fa.reporte, proyecto:fa.proyecto, proceso:fa.proceso,
+        servidor_fo:servidor, f_servidor:servidor, f_base_datos:f.base_datos, f_tabla:f.tabla, f_campo:f.nombre_campo,
+        f_primaria:f.es_fuente_primaria, f_tipo:f.tipo_campo, f_longitud:numero(f.longitud_campo), f_nulos:f.acepta_valores_nulos,
+        f_formula:f.formula_calculo, f_valores:f.lista_valores_validos, f_fecha:f.fecha_aprobacion, f_version:f.version,
+        _a:fa._a, _d:fa._d,
+      };
+      // la busqueda mira el atributo y SOLO esta fuente (no las otras fuentes del mismo atributo)
+      fila._buscar = sinTildes([fa.codigo, fa.nombre_atributo, fa._a.descripcion_atributo, fa.tipo_atributo,
+        fa.atributo_primario, fa.dominio_primario, fa.clasificacion_dato_personal,
+        ...ROLES_EXP.map(r => fa[r.clave]),                                    // responsables, como en la vista por atributo
+        ...fa._a.fuentes_consumo.flatMap(x => [x.servidor, x.base_datos, x.tabla, x.nombre_campo, x.clase]),
+        servidor, f.base_datos, f.tabla, f.nombre_campo, f.formula_calculo, f.lista_valores_validos, f.tipo_campo]
+        .filter(Boolean).join(" ")).toLowerCase();
+      return fila;
+    }));
+  }
+  const filasVista = () => porFuente() ? FILAS_FTE : FILAS_EXP;
+  const valoresDe = (fila, campo) => Array.isArray(fila[campo]) ? fila[campo] : [fila[campo] || ""];
+
+  function camposFiltroExp(){
+    return [["dominio","Dominio"], DATOS.resumen.n_confidenciales ? ["estado_vigencia","Estado del dominio"] : null,
+      ["criticidad","Criticidad"], ["compartido_similar","Compartido / similar"],
+      REL ? ["estado_vinculo","Estado del vínculo"] : null, ["tipo_atributo","Tipo de atributo"], ["es_dato_personal","Dato personal"],
+      ["tiene_fo","Fuente oficial"], ["servidor_fo","Servidor (f. oficial)"], ["tiene_consumo","Fuente de consumo"],
+      ["estructura","Estructura"], ["reporte","Reporte"],
+      ["proyecto","Proyecto"], ["proceso","Proceso"]].filter(Boolean)
+      .filter(([campo]) => !(porFuente() && campo === "tiene_fo"));   // en la vista por fuente todas tienen fuente oficial
+  }
   function filtrosExp(){
     const vacio = {compartido_similar:"(ninguno)", estado_vinculo:"(sin relación)"};
     const etiquetas = {tiene_fo:{"Sí":"Con fuente oficial", "No":"Sin fuente oficial"},
                        tiene_consumo:{"Sí":"Con fuente de consumo", "No":"Sin fuente de consumo"}};
-    const defs = [["dominio","Dominio"], DATOS.resumen.n_confidenciales ? ["estado_vigencia","Estado del dominio"] : null,
-      ["criticidad","Criticidad"], ["compartido_similar","Compartido / similar"],
-      REL ? ["estado_vinculo","Estado del vínculo"] : null, ["tipo_atributo","Tipo de atributo"], ["es_dato_personal","Dato personal"],
-      ["tiene_fo","Fuente oficial"], ["tiene_consumo","Fuente de consumo"], ["estructura","Estructura"], ["reporte","Reporte"],
-      ["proyecto","Proyecto"], ["proceso","Proceso"]].filter(Boolean);
-    return defs.map(([campo, titulo]) => {
+    return camposFiltroExp().map(([campo, titulo]) => {
+      // conteo por fila de la vista actual (un atributo con dos servidores cuenta en los dos)
       const n = new Map();
-      for (const f of FILAS_EXP) n.set(f[campo] || "", (n.get(f[campo] || "") || 0) + 1);
+      for (const f of filasVista()) for (const x of new Set(valoresDe(f, campo))) n.set(x, (n.get(x) || 0) + 1);
+      if (!EXP.sel[campo]) EXP.sel[campo] = new Set();
+      // filtros recuperados que ya no existen en NINGUNA de las dos vistas (al cambiar de vista no se pierde la seleccion)
+      for (const valor of [...EXP.sel[campo]])
+        if (!n.has(valor) && ![FILAS_EXP, FILAS_FTE].some(l => l.some(f => valoresDe(f, campo).includes(valor)))) EXP.sel[campo].delete(valor);
+      // elegido pero sin filas en esta vista (p. ej. un dominio confidencial en la vista por fuente): se dibuja
+      // marcado con 0, para que se entienda el resultado vacio y se pueda desmarcar
+      for (const valor of EXP.sel[campo]) if (!n.has(valor)) n.set(valor, 0);
       const opciones = [...n].map(([valor, cuantos]) => ({valor, n:cuantos,
         etiqueta: campo === "dominio" ? valor + " · " + (porCodigo.get(valor) || {}).nombre
           : (etiquetas[campo] || {})[valor] || valor || vacio[campo] || "(vacío)"}))
-        .sort((a, b) => a.etiqueta.localeCompare(b.etiqueta, "es", {numeric:true}));
-      if (!EXP.sel[campo]) EXP.sel[campo] = new Set();
-      for (const valor of [...EXP.sel[campo]]) if (!n.has(valor)) EXP.sel[campo].delete(valor);  // filtros recuperados que ya no existen
+        .sort((a, b) => COLL_EXP.compare(a.etiqueta, b.etiqueta));
       return {campo, titulo, opciones};
     });
   }
 
   function filasFiltradasExp(){
     const palabras = sinTildes(EXP.texto).toLowerCase().split(/\s+/).filter(Boolean);
-    const activos = Object.entries(EXP.sel).filter(([, s]) => s.size);
-    const filas = FILAS_EXP.filter(f => activos.every(([c, s]) => s.has(f[c] || "")) &&
+    const vigentes = new Set(camposFiltroExp().map(([c]) => c));   // solo los filtros que la vista muestra
+    const activos = Object.entries(EXP.sel).filter(([c, s]) => s.size && vigentes.has(c));
+    const filas = filasVista().filter(f => activos.every(([c, s]) => valoresDe(f, c).some(x => s.has(x))) &&
       palabras.every(p => f._buscar.includes(p)));
-    const {campo, asc} = EXP.orden;
+    const {campo, asc} = porFuente() ? EXP.ordenFte : EXP.orden;
+    const cmp = (a, b, k) => {
+      const x = a[k], y = b[k];
+      return NUMERICAS_EXP.has(k) ? (x - y) : COLL_EXP.compare(String(x ?? ""), String(y ?? ""));
+    };
     filas.sort((a, b) => {
-      const x = a[campo], y = b[campo];
-      const r = NUMERICAS_EXP.has(campo) ? (x - y) : String(x || "").localeCompare(String(y || ""), "es", {numeric:true});
-      return asc ? r : -r;
+      const r = cmp(a, b, campo);
+      if (r || !porFuente()) return asc ? r : -r;
+      for (const k of ORDEN_FTE) { if (k === campo) continue; const t = cmp(a, b, k); if (t) return t; }   // desempate: servidor, base, tabla, campo
+      return 0;
     });
     return filas;
   }
 
-  function leerColumnasGuardadas(){
+  function leerColumnasGuardadas(cols, clave){
     try {
-      const v = JSON.parse(localStorage.getItem(CLAVE_COLS) || "null");
-      if (Array.isArray(v)) { const ok = v.filter(k => COLS_EXP.some(c => c[0] === k)); if (ok.length) return ok; }
+      const v = JSON.parse(localStorage.getItem(clave) || "null");
+      if (Array.isArray(v)) { const ok = v.filter(k => cols.some(c => c[0] === k)); if (ok.length) return ok; }
     } catch (e) { /* almacenamiento no disponible: se usan las columnas por defecto */ }
-    return COLS_EXP.filter(c => c[4]).map(c => c[0]);
+    return cols.filter(c => c[4]).map(c => c[0]);
   }
-  function guardarColumnas(){ try { localStorage.setItem(CLAVE_COLS, JSON.stringify(EXP.columnas)); } catch (e) {} }
+  function guardarColumnas(){
+    try {
+      if (porFuente()) localStorage.setItem(CLAVE_COLS_FTE, JSON.stringify(EXP.columnasFte));
+      else localStorage.setItem(CLAVE_COLS, JSON.stringify(EXP.columnas));
+    } catch (e) {}
+  }
+  // columnas de la vista actual: [definiciones, claves elegidas]
+  const colsVista = () => porFuente() ? [COLS_FTE, EXP.columnasFte] : [COLS_EXP, EXP.columnas];
 
   // Desplegable de seleccion multiple (filtro o selector de columnas).
   function desplegableMulti(titulo, opciones, seleccion, alCambiar, conConteo){
@@ -2421,23 +2503,44 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
 
   function vistaExplorador(d){
     if (!FILAS_EXP) FILAS_EXP = construirFilasExp();
-    if (!EXP.columnas) EXP.columnas = leerColumnasGuardadas();
+    if (!FILAS_FTE) FILAS_FTE = construirFilasFte();
+    if (!EXP.columnas) EXP.columnas = leerColumnasGuardadas(COLS_EXP, CLAVE_COLS);
+    if (!EXP.columnasFte) EXP.columnasFte = leerColumnasGuardadas(COLS_FTE, CLAVE_COLS_FTE);
+    // el menu lateral actua como filtro de dominio (solo al llegar, no al cambiar de vista)
+    if (d && !expCambioVista) { EXP.sel.dominio = new Set([d.codigo]); EXP.pagina = 0; }
+    expCambioVista = false;
     const filtros = filtrosExp();
-    if (d) { EXP.sel.dominio = new Set([d.codigo]); EXP.pagina = 0; }   // el menu lateral actua como filtro de dominio
 
     const resultado = el("div", {clase:"exp-resultado"});
     const pintar = () => { EXP.pagina = 0; pintarResultadoExp(resultado); };
     const desplegables = filtros.map(f => desplegableMulti(f.titulo, f.opciones, EXP.sel[f.campo], pintar, true));
-    const selCols = new Set(EXP.columnas);
-    const colsDesp = desplegableMulti("Columnas", COLS_EXP.map(c => ({valor:c[0], etiqueta:c[1]})), selCols, () => {
+    const [defsCols, elegidas] = colsVista();
+    const selCols = new Set(elegidas);
+    const colsDesp = desplegableMulti("Columnas", defsCols.map(c => ({valor:c[0], etiqueta:c[1]})), selCols, () => {
       if (!selCols.size) selCols.add("codigo");
-      EXP.columnas = COLS_EXP.map(c => c[0]).filter(k => selCols.has(k));
+      const nuevas = defsCols.map(c => c[0]).filter(k => selCols.has(k));
+      if (porFuente()) EXP.columnasFte = nuevas; else EXP.columnas = nuevas;
       guardarColumnas(); pintarResultadoExp(resultado);
     }, false);
     colsDesp.classList.add("filtro-columnas");
 
+    // selector de vista: los filtros y el texto se conservan al cambiar
+    const botonVista = (vista, etiqueta, ayuda) => el("button", {type:"button", texto:etiqueta, title:ayuda,
+      "data-vista": vista, "aria-pressed": String(EXP.vista === vista),
+      onclick: () => {
+        if (EXP.vista === vista) return;
+        EXP.vista = vista; EXP.pagina = 0; expCambioVista = true; pintarContenido();
+        const nuevo = document.querySelector('.exp-vista button[data-vista="' + vista + '"]');   // el repintado destruye el boton
+        if (nuevo) nuevo.focus();
+      }});
+    const selVista = el("div", {clase:"exp-vista", role:"group", "aria-label":"Vista del resultado"}, [
+      botonVista("atributo", "Por atributo", "Una fila por atributo; sus fuentes van en la misma celda"),
+      botonVista("fuente", "Por fuente oficial", "Una fila por fuente oficial: servidor, base de datos, tabla y campo con sus características"),
+    ]);
+
     const texto = el("input", {type:"search", clase:"exp-texto", value: EXP.texto,
-      placeholder:"Buscar en código, nombre, descripción, tablas, campos, fórmulas, responsables…"});
+      placeholder: porFuente() ? "Buscar en código, atributo, servidor, base, tabla, campo, fórmula, valores válidos…"
+        : "Buscar en código, nombre, descripción, tablas, campos, fórmulas, responsables…"});
     let espera = null;
     texto.addEventListener("input", () => { clearTimeout(espera); espera = setTimeout(() => { EXP.texto = texto.value; pintar(); }, 200); });
     const limpiar = el("button", {type:"button", clase:"btn-detalle", texto:"Limpiar filtros", onclick: () => {
@@ -2445,12 +2548,16 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
       desplegables.forEach(x => x.refrescar()); pintar();
     }});
     const excel = el("button", {type:"button", clase:"btn-excel-exp", texto:"Descargar Excel",
-      onclick: () => descargarExplorador(filasFiltradasExp())});
+      onclick: () => porFuente() ? descargarFuentesExp(filasFiltradasExp()) : descargarExplorador(filasFiltradasExp())});
 
     const cab = el("div", {clase:"cabecera"}, [el("div", null, [el("h2", {texto:"Explorador de atributos"}),
-      el("div", {clase:"sub", texto:"Atributos activos de todos los dominios. Combina filtros, elige las columnas y descarga el resultado."})])]);
+      el("div", {clase:"sub", texto: porFuente()
+        ? "Fuentes oficiales de los atributos activos: una fila por servidor, base de datos, tabla y campo. Combina filtros, elige las columnas y descarga el resultado."
+        : "Atributos activos de todos los dominios. Combina filtros, elige las columnas y descarga el resultado."})])]);
+    const avisoConf = porFuente() && DATOS.resumen.n_confidenciales ? el("div", {clase:"nota", role:"note",
+      texto:"Las fuentes de los dominios confidenciales no se publican: no aparecen en esta vista."}) : null;
     const barra = el("div", {clase:"exp-barra"}, [
-      el("div", {clase:"exp-fila"}, [texto, excel]),
+      el("div", {clase:"exp-fila"}, [selVista, texto, excel]), avisoConf,
       el("div", {clase:"exp-fila exp-filtros"}, [...desplegables, colsDesp, limpiar]),
     ]);
     pintarResultadoExp(resultado);
@@ -2459,14 +2566,18 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
 
   function pintarResultadoExp(cont){
     const filas = filasFiltradasExp();
-    const cols = COLS_EXP.filter(c => EXP.columnas.includes(c[0]));
+    const [defsCols, elegidas] = colsVista();
+    const cols = defsCols.filter(c => elegidas.includes(c[0]));
+    const fte = porFuente(), orden = fte ? EXP.ordenFte : EXP.orden;
     const paginas = Math.max(1, Math.ceil(filas.length / EXP.porPagina));
     EXP.pagina = Math.min(EXP.pagina, paginas - 1);
     const desde = EXP.pagina * EXP.porPagina, pagina = filas.slice(desde, desde + EXP.porPagina);
     const dominios = new Set(filas.map(f => f.dominio)).size;
 
     const nav = el("div", {clase:"exp-nav"}, [
-      el("span", {clase:"nota", texto: filas.length + " de " + FILAS_EXP.length + " atributos · " + dominios + " dominio(s)" +
+      el("span", {clase:"nota", texto: (fte
+        ? filas.length + " de " + FILAS_FTE.length + " fuentes oficiales · " + new Set(filas.map(f => f.codigo)).size + " atributo(s) · "
+        : filas.length + " de " + FILAS_EXP.length + " atributos · ") + dominios + " dominio(s)" +
         (filas.length ? " · mostrando " + (desde + 1) + "–" + (desde + pagina.length) : "")}),
       paginas > 1 ? el("span", {clase:"exp-paginas"}, [
         el("button", {type:"button", texto:"‹ Anterior", disabled: EXP.pagina === 0 ? "" : null,
@@ -2476,13 +2587,15 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
           onclick: () => { EXP.pagina++; pintarResultadoExp(cont); }}),
       ]) : null,
     ]);
-    if (!filas.length){ cont.replaceChildren(nav, el("div", {clase:"vacio", texto:"Ningún atributo cumple los filtros."})); return; }
+    if (!filas.length){ cont.replaceChildren(nav, el("div", {clase:"vacio", texto: fte ? "Ninguna fuente oficial cumple los filtros." : "Ningún atributo cumple los filtros."})); return; }
 
     const thead = el("thead", null, el("tr", null, cols.map(([k, etq]) => {
-      const activo = EXP.orden.campo === k;
+      const activo = orden.campo === k;
       return el("th", {clase:"ordenable", title:"Ordenar por " + etq, onclick: () => {
-        EXP.orden = {campo:k, asc: activo ? !EXP.orden.asc : true}; pintarResultadoExp(cont);
-      }}, [etq, activo ? (EXP.orden.asc ? " ▲" : " ▼") : ""]);
+        const nuevo = {campo:k, asc: activo ? !orden.asc : true};
+        if (fte) EXP.ordenFte = nuevo; else EXP.orden = nuevo;
+        pintarResultadoExp(cont);
+      }}, [etq, activo ? (orden.asc ? " ▲" : " ▼") : ""]);
     })));
     const tbody = el("tbody", null, pagina.map(f => el("tr", null, cols.map(([k, , , largo]) => {
       if (k === "codigo") return el("td", null, el("button", {type:"button", clase:"enlace-atributo", texto:f.codigo,
@@ -2533,6 +2646,33 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
     ]});
     const t = new Date(), dos = n => String(n).padStart(2, "0");
     entregarLibro(hojas, "explorador_atributos_" + t.getFullYear() + dos(t.getMonth() + 1) + dos(t.getDate()) + "_" +
+      dos(t.getHours()) + dos(t.getMinutes()) + ".xlsx");
+  }
+
+  // Excel de la vista "Por fuente oficial": hoja con las columnas elegidas (una fila por fuente) + hoja de filtros.
+  function descargarFuentesExp(filas){
+    const cols = COLS_FTE.filter(c => EXP.columnasFte.includes(c[0]));
+    const etiquetasFiltro = Object.fromEntries(filtrosExp().map(f => [f.campo, f]));
+    const aplicados = Object.entries(EXP.sel).filter(([c, s]) => s.size && etiquetasFiltro[c]).map(([c, s]) => {
+      const def = etiquetasFiltro[c];
+      return {campo: def.titulo, valor: [...s].map(x => (def.opciones.find(o => o.valor === x) || {etiqueta:x}).etiqueta).join(", ")};
+    });
+    const generado = (document.querySelector(".marca small") || {}).textContent || "";
+    const hojas = [
+      {nombre:"Fuentes oficiales", columnas: cols.map(([k, etq, ancho, largo]) => [k, etq, ancho, largo]),
+       filas: filas.map(f => Object.fromEntries(cols.map(([k]) => [k, f[k]])))},   // la longitud sale como numero
+      {nombre:"Filtros", columnas:[["campo","Dato",28], ["valor","Valor",80,1]], filas: [
+        {campo:"Vista", valor:"Por fuente oficial (una fila por servidor / base de datos / tabla / campo)"},
+        {campo:"Texto buscado", valor: EXP.texto || "(sin texto)"}, ...aplicados,
+        {campo:"Fuentes oficiales", valor: filas.length + " de " + FILAS_FTE.length},
+        {campo:"Atributos", valor: new Set(filas.map(f => f.codigo)).size},
+        ...(DATOS.resumen.n_confidenciales ? [{campo:"Dominios confidenciales", valor: AVISO_CONF + " No están en esta hoja."}] : []),
+        {campo:"Columnas", valor: cols.map(c => c[1]).join(", ")},
+        {campo:"Sitio", valor: generado}, {campo:"Descargado", valor: new Date().toLocaleString("es")},
+      ]},
+    ];
+    const t = new Date(), dos = n => String(n).padStart(2, "0");
+    entregarLibro(hojas, "explorador_fuentes_oficiales_" + t.getFullYear() + dos(t.getMonth() + 1) + dos(t.getDate()) + "_" +
       dos(t.getHours()) + dos(t.getMinutes()) + ".xlsx");
   }
 
