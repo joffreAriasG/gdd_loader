@@ -466,6 +466,10 @@ def construir_modelo(datos: dict[str, list[dict]], relaciones: dict | None = Non
             # todos los roles de cat_rol (columnas de responsables del Explorador)
             "roles": [{"id": i, "nombre": n} for i, n in sorted(nombres_rol.items())],
             "secciones_investigacion": secciones_investigacion,
+            # codificacion -> tipo de dato de cat_dato_personal (vacio si la base no tiene la columna)
+            "dato_personal": {a_texto(c.get("codificacion")): a_texto(c.get("tipo_dato"))
+                              for c in datos.get("cat_dato_personal", [])
+                              if a_texto(c.get("codificacion")) and a_texto(c.get("tipo_dato"))},
             # planes ligados a una version anterior (inactiva) de un atributo que SI tiene version vigente, y planes
             # activos cuyo atributo ya no tiene ninguna version activa: ver SQL_PLANES (hallazgos 2026-11-12)
             "planes_version_anterior": sum(1 for d in lista for p in d["planes"]
@@ -801,6 +805,9 @@ details.filtro-columnas[open] > summary,details.filtro-columnas > summary:hover{
 .opcion-filtro{display:grid;grid-template-columns:auto 1fr auto;gap:8px;align-items:center;padding:4px 6px;border-radius:6px;
   cursor:pointer;font-size:13px}
 .opcion-filtro:hover{background:var(--amarillo-suave)}
+.opcion-filtro.sin-filas{color:var(--muted)}
+.filtro-ayuda{font-size:12px;color:var(--muted);margin-bottom:8px;line-height:1.35}
+.exp-unidad{font-size:12px}
 .opcion-filtro input{accent-color:var(--marino)}
 .exp-nav{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:8px}
 .exp-paginas{display:inline-flex;gap:8px;align-items:center;font-size:13px}
@@ -1045,6 +1052,10 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
     return n;
   }
   const v = x => (x === undefined || x === null || x === "") ? "—" : x;
+  // El "-" del origen es "sin dato" (v0.17.0). Solo los enteros pasan a numero: "18.2", "50,0" o "(8,0)" son
+  // precision y escala, y se quedan como texto (igual en pantalla y en los Excel).
+  const limpio = x => { const s = x === undefined || x === null ? "" : String(x).trim(); return s === "-" ? "" : (typeof x === "number" ? x : s); };
+  const numEntero = x => { const s = limpio(x); return /^\d+$/.test(s) ? Number(s) : s; };
   function cuenta(n){ return el("span", {clase:"cuenta", texto:String(n)}); }
 
   function ficha(campos, fila){
@@ -1371,11 +1382,11 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
     const cod = a => d.codigo + "-" + a.codigo_atributo;
     const num = x => /^\d+(\.\d+)?$/.test(x || "") ? Number(x) : (x || "");
     const base = a => ({dominio: d.codigo, codigo: cod(a), nombre_atributo: a.nombre_atributo});
-    const colsBase = [["dominio","Dominio",10], ["codigo","Código del atributo",14], ["nombre_atributo","Nombre del atributo",34]];
+    const colsBase = [["dominio","Dominio",10], ["codigo","Código",14], ["nombre_atributo","Atributo",34]];
 
     const hAtributos = {nombre:"Atributos", columnas:[
-      ["dominio","Dominio",10], ["nombre_dominio","Nombre del dominio",30], ["codigo","Código del atributo",14],
-      ["codigo_atributo","Código numérico",10], ["nombre_atributo","Nombre del atributo",34], ["descripcion_atributo","Descripción",60,1],
+      ["dominio","Dominio",10], ["nombre_dominio","Nombre del dominio",30], ["codigo","Código",14],
+      ["codigo_atributo","Código numérico",10], ["nombre_atributo","Atributo",34], ["descripcion_atributo","Descripción",60,1],
       ["criticidad","Criticidad",14], ["tipo_atributo","Tipo de atributo",18], ["compartido_similar","Compartido / similar",14],
       ["atributo_primario","Atributo primario",30], ["dominio_primario","Dominio primario",30], ["es_dato_personal","Dato personal",10],
       ["clasificacion_dato_personal","Clasificación dato personal",24], ["reporte","Reporte",9], ["proyecto","Proyecto",9],
@@ -1389,7 +1400,7 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
       ["es_fuente_primaria","Primaria",9], ["tipo_campo","Tipo de campo",12], ["longitud_campo","Longitud",9],
       ["acepta_valores_nulos","Acepta nulos",9], ["formula_calculo","Fórmula de cálculo",70,1],
       ["lista_valores_validos","Valores válidos",50,1], ["fecha_aprobacion","Fecha de aprobación",13], ["version","Versión",8]]),
-      filas: atributos.flatMap(a => a.fuentes_oficiales.map(f => ({...f, ...base(a), longitud_campo: num(f.longitud_campo), version: num(f.version)})))};
+      filas: atributos.flatMap(a => a.fuentes_oficiales.map(f => ({...f, ...base(a), longitud_campo: numEntero(f.longitud_campo), version: num(f.version)})))};
 
     const hConsumo = {nombre:"Fuentes de consumo", columnas: colsBase.concat([
       ["clase","Clase",14], ["servidor","Servidor",18], ["base_datos","Base de datos / colección",32], ["tabla","Tabla",28],
@@ -1407,10 +1418,10 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
       for (const x of REL.aristas.flatMap(a => a.atributos).concat(REL.problemas)){
         if (codigos.has(x.codigo_origen)) hRelaciones.filas.push({direccion:"Usa", dominio:d.codigo, codigo:x.codigo_origen,
           nombre_atributo:x.atributo_origen, tipo:x.tipo, dominio_rel:x.dominio_destino, atributo_rel:x.atributo_destino,
-          estado:x.estado, estado_desc:desc(x.estado)});
+          estado:etqEstado(x.estado), estado_desc:desc(x.estado)});
         const a = x.dominio_destino === d.codigo ? porNombre.get(norm(x.atributo_destino)) : null;
         if (a) hRelaciones.filas.push({direccion:"Es usado por", ...base(a), tipo:x.tipo, dominio_rel:x.dominio_origen,
-          atributo_rel: x.codigo_origen + " · " + x.atributo_origen, estado:x.estado, estado_desc:desc(x.estado)});
+          atributo_rel: x.codigo_origen + " · " + x.atributo_origen, estado:etqEstado(x.estado), estado_desc:desc(x.estado)});
       }
     }
 
@@ -1423,7 +1434,7 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
       {campo:"Fuentes oficiales", valor: hOficiales.filas.length}, {campo:"Fuentes de consumo", valor: hConsumo.filas.length},
       {campo:"Relaciones", valor: REL ? hRelaciones.filas.length : "No disponibles (falta la vista gdd.v_relacion_atributo)"},
       {campo:"Sitio", valor: generado}, {campo:"Descargado", valor: new Date().toLocaleString("es")},
-      {campo:"Nota", valor:"Hojas relacionadas por Dominio + Código del atributo. Fuente: gdd.* (registros activos), solo lectura."},
+      {campo:"Nota", valor:"Hojas relacionadas por Dominio + Código. Fuente: gdd.* (registros activos), solo lectura."},
     ].filter(Boolean)};
     return [hAtributos, hOficiales, hConsumo, hRelaciones, hFiltro];
   }
@@ -1767,9 +1778,15 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
     setTimeout(actualizar, 0);   // fuera del manejador de clic de vis (la red se destruye al repintar)
   }
 
+  // Estado del vinculo (v0.17.0, GDD-06): texto corto para el usuario; el codigo solo queda en los datos y
+  // la descripcion larga (descripcion_estado) va como ayuda al pasar el mouse.
+  const ETQ_ESTADO = {RESUELTO:"Resuelto", DESTINO_INACTIVO:"Apunta a versión inactiva", MISMO_DOMINIO:"Primario en el mismo dominio",
+    SIN_VINCULO:"Sin atributo primario resuelto", VINCULO_ROTO:"Vínculo roto", INCONSISTENTE:"Dominio primario inconsistente",
+    SIN_TIPO:"Vínculo sin tipo", DOMINIO_INACTIVO:"Primario en dominio inactivo"};
+  const etqEstado = e => ETQ_ESTADO[e] || e;
   function chipEstado(e){
     return el("span", {clase: "chip" + (e === "RESUELTO" || e === "MISMO_DOMINIO" ? "" : " pers"),
-      title: (REL.descripcion_estado || {})[e] || "", texto: e === "DESTINO_INACTIVO" ? "versión inactiva" : e});
+      title: (REL.descripcion_estado || {})[e] || "", texto: etqEstado(e)});
   }
 
   function tablaVecinos(aristas, campo, vacio){
@@ -1917,7 +1934,7 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
     if (!d){
       const estados = [...new Set(REL.problemas.map(p => p.estado))];
       const sel = el("select", null, [el("option", {value:"", texto:"Todos los estados (" + REL.problemas.length + ")"}),
-        ...estados.map(e => el("option", {value:e, texto: e + " (" + REL.problemas.filter(p => p.estado === e).length + ")"}))]);
+        ...estados.map(e => el("option", {value:e, texto: etqEstado(e) + " (" + REL.problemas.filter(p => p.estado === e).length + ")"}))]);
       sel.value = estado.estadoRel;
       sel.addEventListener("change", () => { estado.estadoRel = sel.value; pintarContenido(); });
       const problemas = REL.problemas.filter(p => !estado.estadoRel || p.estado === estado.estadoRel);
@@ -2249,16 +2266,16 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
     ["tipo_atributo","Tipo de atributo",16,0,0], ["compartido_similar","Compartido / similar",14,0,1],
     ["atributo_primario","Atributo primario",28,0,0], ["dominio_primario","Dominio primario",28,0,0],
     ["estado_vinculo","Estado del vínculo",16,0,0], ["es_dato_personal","Dato personal",10,0,0],
-    ["clasificacion_dato_personal","Clasificación dato personal",22,0,0], ["reporte","Reporte",9,0,0], ["proyecto","Proyecto",9,0,0],
+    ["clasificacion_dato_personal","Clasificación dato personal",40,1,0], ["reporte","Reporte",9,0,0], ["proyecto","Proyecto",9,0,0],
     ["proceso","Proceso",9,0,0], ["estructura","Estructura",10,0,0], ["fecha_aprobacion","Fecha de aprobación",13,0,0],
-    ["version","Versión",8,0,0], ["tiene_fo","Con fuente oficial",11,0,1], ["n_oficiales","N.º fuentes oficiales",10,0,1],
+    ["version","Versión",8,0,0], ["tiene_fo","Fuente oficial",18,0,1], ["n_oficiales","N.º fuentes oficiales",10,0,1],
     ["fuente_primaria","Fuente primaria",50,1,0],
     // fuentes separadas por campo (pedido 2026-11-11): con varias fuentes, valores unidos por " | " en el mismo orden
     ["fo_servidor","Servidor (f. oficial)",20,1,0], ["fo_base_datos","Base de datos (f. oficial)",36,1,0],
-    ["fo_tabla","Tabla (f. oficial)",28,1,0], ["fo_campo","Campo (f. oficial)",26,1,0],
-    ["tiene_consumo","Con fuente de consumo",11,0,0], ["n_consumo","N.º fuentes de consumo",10,0,1],
+    ["fo_tabla","Tabla / archivo (f. oficial)",28,1,0], ["fo_campo","Campo (f. oficial)",26,1,0],
+    ["tiene_consumo","Fuente de consumo",20,0,0], ["n_consumo","N.º fuentes de consumo",10,0,1],
     ["fc_clase","Clase (f. consumo)",14,1,0], ["fc_servidor","Servidor (f. consumo)",20,1,0],
-    ["fc_base_datos","Base de datos (f. consumo)",32,1,0], ["fc_tabla","Tabla (f. consumo)",28,1,0],
+    ["fc_base_datos","Base de datos / colección (f. consumo)",32,1,0], ["fc_tabla","Tabla (f. consumo)",28,1,0],
     ["fc_campo","Campo (f. consumo)",26,1,0], ["resta","Resta al puntaje",9,0,0],
   ];
   const OCULTO_CONF = "(confidencial)";
@@ -2289,10 +2306,25 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
     ["f_servidor","Servidor",20,0,1], ["f_base_datos","Base de datos",36,1,1], ["f_tabla","Tabla / archivo",28,1,1],
     ["f_campo","Campo",26,0,1], ["f_primaria","Primaria",9,0,1], ["f_tipo","Tipo de campo",12,0,1], ["f_longitud","Longitud",9,0,1],
     ["f_nulos","Acepta nulos",9,0,1], ["f_formula","Fórmula de cálculo",70,1,0], ["f_valores","Valores válidos",50,1,0],
-    ["f_fecha","Fecha de aprobación (fuente)",13,0,0], ["f_version","Versión (fuente)",8,0,0],
+    ["f_fecha","Fecha de aprobación (fuente)",13,0,0],
   ];
   const ORDEN_FTE = ["f_servidor", "f_base_datos", "f_tabla", "f_campo", "codigo"];   // desempate de la vista por fuente
-  const SIN_SERVIDOR = "(sin servidor)";
+  // "Sin dato" (decision del usuario 2026-11-19): "(sin dato)" en los filtros, "—" en la tabla y celda vacia en el
+  // Excel. Dos vacios tienen significado propio y llevan su texto en todas partes. El "-" del origen es vacio.
+  const SIN_DATO = "(sin dato)";
+  const VACIO_PROPIO = {compartido_similar:"Ninguno", estado_vinculo:"No aplica"};
+  // Valores que se muestran con otra etiqueta (el dato no cambia: los filtros comparan el valor original)
+  const VALORES_EXP = {tiene_fo:{"Sí":"Con fuente oficial", "No":"Sin fuente oficial"},
+                       tiene_consumo:{"Sí":"Con fuente de consumo", "No":"Sin fuente de consumo"}};
+  const DP_TIPO = DATOS.resumen.dato_personal || {};   // codificacion -> tipo de dato (cat_dato_personal), si existe
+  const ETQ_ORDEN = new Set(["estado_vinculo", "compartido_similar", ...Object.keys(VALORES_EXP)]);   // se ordenan por lo que se ve
+  // Texto que ve el usuario para el valor del campo k (tabla y Excel; los filtros usan etqOpcion)
+  function mostrarExp(k, x){
+    if (k === "estado_vinculo") return x ? etqEstado(x) : (REL ? VACIO_PROPIO.estado_vinculo : x);   // sin relaciones: no se sabe
+    if (k === "compartido_similar") return x || VACIO_PROPIO.compartido_similar;
+    if (VALORES_EXP[k]) return VALORES_EXP[k][x] || x;
+    return x;
+  }
   const NUMERICAS_EXP = new Set(["n_oficiales", "n_consumo", "resta"]);
   const CLAVE_COLS = "gdd_sitio_explorador_columnas";
   const CLAVE_COLS_FTE = "gdd_sitio_explorador_columnas_fuente";
@@ -2334,7 +2366,7 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
   function construirFilasExp(){
     const estadoVinc = new Map();
     if (REL) for (const x of REL.aristas.flatMap(a => a.atributos).concat(REL.problemas)) estadoVinc.set(x.codigo_origen, x.estado);
-    const ruta = f => [f.servidor, f.base_datos, f.tabla, f.nombre_campo].filter(Boolean).join(" / ");
+    const ruta = f => [f.servidor, f.base_datos, f.tabla, f.nombre_campo].map(limpio).filter(Boolean).join(" / ");
     const respPorDominio = new Map(DATOS.dominios.map(d => [d.codigo, responsablesPorRol(d)]));
     return DATOS.dominios.flatMap(d => d.atributos.map(a => {
       const resp = respPorDominio.get(d.codigo);
@@ -2342,14 +2374,21 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
       const prim = fo.find(f => f.es_fuente_primaria === "Sí") || fo[0];
       const conf = esConf(d), n_fo = nFO(a), n_fc = nFC(a);
       // dominio confidencial: el detalle no viene en los datos; se marca para no confundirlo con "sin fuente"
-      const unir = (lista, n, campo) => conf ? (n ? OCULTO_CONF : "") : lista.map(f => f[campo] || "—").join(" | ");
+      // con varias fuentes "—" mantiene la alineacion con " | "; si ninguna tiene el dato, la celda queda vacia
+      const unir = (lista, n, campo) => {
+        if (conf) return n ? OCULTO_CONF : "";
+        const vals = lista.map(f => limpio(f[campo]));
+        return vals.some(x => x !== "") ? vals.map(x => x || "—").join(" | ") : "";
+      };
       const fila = {
         dominio:d.codigo, nombre_dominio:d.nombre, estado_vigencia: d.estado_vigencia || "Activo",
         codigo, codigo_atributo:a.codigo_atributo, nombre_atributo:a.nombre_atributo,
         descripcion_atributo:a.descripcion_atributo, criticidad:a.criticidad, tipo_atributo:a.tipo_atributo,
         compartido_similar:a.compartido_similar, atributo_primario:a.atributo_primario, dominio_primario:a.dominio_primario,
         estado_vinculo: estadoVinc.get(codigo) || "", es_dato_personal:a.es_dato_personal,
-        clasificacion_dato_personal:a.clasificacion_dato_personal, reporte:a.reporte, proyecto:a.proyecto, proceso:a.proceso,
+        clasificacion_dato_personal: a.clasificacion_dato_personal && DP_TIPO[a.clasificacion_dato_personal]
+          ? a.clasificacion_dato_personal + " · " + DP_TIPO[a.clasificacion_dato_personal] : a.clasificacion_dato_personal,
+        reporte:a.reporte, proyecto:a.proyecto, proceso:a.proceso,
         estructura:a.estructura, fecha_aprobacion:a.fecha_aprobacion, version:a.version,
         tiene_fo: n_fo ? "Sí" : "No", n_oficiales: n_fo,
         fuente_primaria: conf ? (n_fo ? OCULTO_CONF : "") : (prim ? ruta(prim) : ""),
@@ -2360,10 +2399,10 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
         fc_tabla: unir(fc, n_fc, "tabla"), fc_campo: unir(fc, n_fc, "nombre_campo"),
         resta: restaAtributo(a), ...resp, _a:a, _d:d,
         // filtro "Servidor (f. oficial)": lista de servidores distintos de sus fuentes oficiales (cumple si tiene alguno)
-        servidor_fo: conf ? (n_fo ? [OCULTO_CONF] : []) : [...new Set(fo.map(f => (f.servidor || "").trim() || SIN_SERVIDOR))],
+        servidor_fo: conf ? (n_fo ? [OCULTO_CONF] : []) : [...new Set(fo.map(f => limpio(f.servidor)))],
       };
-      fila._buscar = sinTildes([codigo, a.nombre_atributo, a.descripcion_atributo, a.atributo_primario, a.dominio_primario,
-        a.tipo_atributo, a.clasificacion_dato_personal, ...Object.values(resp),
+      fila._buscar = sinTildes([codigo, etqEstado(fila.estado_vinculo), a.nombre_atributo, a.descripcion_atributo, a.atributo_primario, a.dominio_primario,
+        a.tipo_atributo, a.clasificacion_dato_personal, DP_TIPO[a.clasificacion_dato_personal], ...Object.values(resp),
         ...fo.flatMap(f => [f.servidor, f.base_datos, f.tabla, f.nombre_campo, f.formula_calculo, f.lista_valores_validos]),
         ...fc.flatMap(f => [f.servidor, f.base_datos, f.tabla, f.nombre_campo, f.clase])].filter(Boolean).join(" ")).toLowerCase();
       return fila;
@@ -2372,22 +2411,22 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
 
   // Una fila por fuente oficial, con los campos del atributo (para que los mismos filtros apliquen) y los de la fuente.
   function construirFilasFte(){
-    const numero = x => /^\d+(\.\d+)?$/.test(String(x ?? "").trim()) ? Number(String(x).trim()) : (x ?? "");
     return FILAS_EXP.filter(fa => !esConf(fa._d)).flatMap(fa => fa._a.fuentes_oficiales.map(f => {
-      const servidor = (f.servidor || "").trim() || SIN_SERVIDOR;
+      const servidor = limpio(f.servidor);
       const fila = {
         dominio:fa.dominio, nombre_dominio:fa.nombre_dominio, estado_vigencia:fa.estado_vigencia, codigo:fa.codigo,
         nombre_atributo:fa.nombre_atributo, criticidad:fa.criticidad, tipo_atributo:fa.tipo_atributo,
         compartido_similar:fa.compartido_similar, estado_vinculo:fa.estado_vinculo, es_dato_personal:fa.es_dato_personal,
         tiene_consumo:fa.tiene_consumo, estructura:fa.estructura, reporte:fa.reporte, proyecto:fa.proyecto, proceso:fa.proceso,
-        servidor_fo:servidor, f_servidor:servidor, f_base_datos:f.base_datos, f_tabla:f.tabla, f_campo:f.nombre_campo,
-        f_primaria:f.es_fuente_primaria, f_tipo:f.tipo_campo, f_longitud:numero(f.longitud_campo), f_nulos:f.acepta_valores_nulos,
-        f_formula:f.formula_calculo, f_valores:f.lista_valores_validos, f_fecha:f.fecha_aprobacion, f_version:f.version,
+        servidor_fo:servidor, f_servidor:servidor, f_base_datos:limpio(f.base_datos), f_tabla:limpio(f.tabla),
+        f_campo:limpio(f.nombre_campo), f_primaria:limpio(f.es_fuente_primaria), f_tipo:limpio(f.tipo_campo),
+        f_longitud:numEntero(f.longitud_campo), f_nulos:limpio(f.acepta_valores_nulos),
+        f_formula:limpio(f.formula_calculo), f_valores:limpio(f.lista_valores_validos), f_fecha:limpio(f.fecha_aprobacion),
         _a:fa._a, _d:fa._d,
       };
       // la busqueda mira el atributo y SOLO esta fuente (no las otras fuentes del mismo atributo)
       fila._buscar = sinTildes([fa.codigo, fa.nombre_atributo, fa._a.descripcion_atributo, fa.tipo_atributo,
-        fa.atributo_primario, fa.dominio_primario, fa.clasificacion_dato_personal,
+        fa.atributo_primario, fa.dominio_primario, fa.clasificacion_dato_personal, etqEstado(fa.estado_vinculo),
         ...ROLES_EXP.map(r => fa[r.clave]),                                    // responsables, como en la vista por atributo
         ...fa._a.fuentes_consumo.flatMap(x => [x.servidor, x.base_datos, x.tabla, x.nombre_campo, x.clase]),
         servidor, f.base_datos, f.tabla, f.nombre_campo, f.formula_calculo, f.lista_valores_validos, f.tipo_campo]
@@ -2402,43 +2441,75 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
     return [["dominio","Dominio"], DATOS.resumen.n_confidenciales ? ["estado_vigencia","Estado del dominio"] : null,
       ["criticidad","Criticidad"], ["compartido_similar","Compartido / similar"],
       REL ? ["estado_vinculo","Estado del vínculo"] : null, ["tipo_atributo","Tipo de atributo"], ["es_dato_personal","Dato personal"],
-      ["tiene_fo","Fuente oficial"], ["servidor_fo","Servidor (f. oficial)"], ["tiene_consumo","Fuente de consumo"],
+      ["tiene_fo","Fuente oficial"], ["servidor_fo", porFuente() ? "Servidor" : "Servidor de la fuente oficial"],
+      ["tiene_consumo","Fuente de consumo"],
       ["estructura","Estructura"], ["reporte","Reporte"],
       ["proyecto","Proyecto"], ["proceso","Proceso"]].filter(Boolean)
       .filter(([campo]) => !(porFuente() && campo === "tiene_fo"));   // en la vista por fuente todas tienen fuente oficial
   }
+  // Ayuda de los filtros con un criterio que no es evidente
+  const AYUDA_FILTRO = {servidor_fo: () => porFuente() ? "" :
+    "Un atributo aparece si ALGUNA de sus fuentes oficiales está en ese servidor; con fuentes en varios servidores cuenta en cada uno. " +
+    "Para ver solo las fuentes de ese servidor usa la vista «Por fuente oficial»."};
+  // Etiqueta de una opcion de filtro
+  function etqOpcion(campo, valor){
+    if (campo === "dominio") return valor + " · " + ((porCodigo.get(valor) || {}).nombre || "");
+    if (campo === "estado_vinculo") return valor ? etqEstado(valor) : (REL ? VACIO_PROPIO.estado_vinculo : SIN_DATO);
+    if (!valor) return VACIO_PROPIO[campo] || SIN_DATO;
+    return (VALORES_EXP[campo] || {})[valor] || valor;
+  }
+  // Orden de las opciones: Si antes que No (y Con antes que Sin); los vacios al final; el resto alfabetico
+  const PESO_BINARIO = {"Sí":0, "No":1};
+  function ordenOpciones(campo, a, b){
+    const va = !a.valor && !VACIO_PROPIO[campo], vb = !b.valor && !VACIO_PROPIO[campo];
+    if (va !== vb) return va ? 1 : -1;
+    const pa = PESO_BINARIO[a.valor], pb = PESO_BINARIO[b.valor];
+    if (pa !== undefined && pb !== undefined) return pa - pb;
+    return COLL_EXP.compare(a.etiqueta, b.etiqueta);
+  }
   function filtrosExp(){
-    const vacio = {compartido_similar:"(ninguno)", estado_vinculo:"(sin relación)"};
-    const etiquetas = {tiene_fo:{"Sí":"Con fuente oficial", "No":"Sin fuente oficial"},
-                       tiene_consumo:{"Sí":"Con fuente de consumo", "No":"Sin fuente de consumo"}};
     return camposFiltroExp().map(([campo, titulo]) => {
-      // conteo por fila de la vista actual (un atributo con dos servidores cuenta en los dos)
       const n = new Map();
       for (const f of filasVista()) for (const x of new Set(valoresDe(f, campo))) n.set(x, (n.get(x) || 0) + 1);
+      // dominios sin atributos activos (p. ej. recien creados): tambien se listan, con 0
+      if (campo === "dominio") for (const d of DATOS.dominios) if (!n.has(d.codigo)) n.set(d.codigo, 0);
       if (!EXP.sel[campo]) EXP.sel[campo] = new Set();
       // filtros recuperados que ya no existen en NINGUNA de las dos vistas (al cambiar de vista no se pierde la seleccion)
       for (const valor of [...EXP.sel[campo]])
-        if (!n.has(valor) && ![FILAS_EXP, FILAS_FTE].some(l => l.some(f => valoresDe(f, campo).includes(valor)))) EXP.sel[campo].delete(valor);
+        if (!n.has(valor) && !porCodigo.has(valor) &&
+            ![FILAS_EXP, FILAS_FTE].some(l => l.some(f => valoresDe(f, campo).includes(valor)))) EXP.sel[campo].delete(valor);
       // elegido pero sin filas en esta vista (p. ej. un dominio confidencial en la vista por fuente): se dibuja
       // marcado con 0, para que se entienda el resultado vacio y se pueda desmarcar
       for (const valor of EXP.sel[campo]) if (!n.has(valor)) n.set(valor, 0);
-      const opciones = [...n].map(([valor, cuantos]) => ({valor, n:cuantos,
-        etiqueta: campo === "dominio" ? valor + " · " + (porCodigo.get(valor) || {}).nombre
-          : (etiquetas[campo] || {})[valor] || valor || vacio[campo] || "(vacío)"}))
-        .sort((a, b) => COLL_EXP.compare(a.etiqueta, b.etiqueta));
-      return {campo, titulo, opciones};
+      const opciones = [...n].map(([valor, cuantos]) => ({valor, n:cuantos, etiqueta: etqOpcion(campo, valor)}))
+        .sort((a, b) => ordenOpciones(campo, a, b));
+      // un filtro con menos de 2 valores no sirve para elegir: se oculta (salvo que tenga algo marcado)
+      const oculto = campo !== "dominio" && [...n.values()].filter(x => x > 0).length < 2 && !EXP.sel[campo].size;
+      const ayuda = AYUDA_FILTRO[campo] ? AYUDA_FILTRO[campo]() : "";
+      return {campo, titulo, opciones, oculto, ayuda};
     });
   }
 
-  function filasFiltradasExp(){
+  // Filtra y cuenta por faceta en una pasada: cada opcion cuenta las filas que quedarian si se eligiera,
+  // con el texto y los DEMAS filtros aplicados (decision del usuario 2026-11-19).
+  function evaluarExp(){
     const palabras = sinTildes(EXP.texto).toLowerCase().split(/\s+/).filter(Boolean);
-    const vigentes = new Set(camposFiltroExp().map(([c]) => c));   // solo los filtros que la vista muestra
-    const activos = Object.entries(EXP.sel).filter(([c, s]) => s.size && vigentes.has(c));
-    const filas = filasVista().filter(f => activos.every(([c, s]) => valoresDe(f, c).some(x => s.has(x))) &&
-      palabras.every(p => f._buscar.includes(p)));
+    const campos = camposFiltroExp().map(([c]) => c);              // solo los filtros que la vista muestra
+    const activos = campos.filter(c => EXP.sel[c] && EXP.sel[c].size);
+    const conteos = Object.fromEntries(campos.map(c => [c, new Map()]));
+    const sumar = (c, f) => { const m = conteos[c]; for (const x of new Set(valoresDe(f, c))) m.set(x, (m.get(x) || 0) + 1); };
+    const filas = [];
+    for (const f of filasVista()){
+      if (!palabras.every(p => f._buscar.includes(p))) continue;
+      let falla = null, nFallas = 0;
+      for (const c of activos) if (!valoresDe(f, c).some(x => EXP.sel[c].has(x))) { falla = c; if (++nFallas > 1) break; }
+      if (nFallas === 0){ filas.push(f); for (const c of campos) sumar(c, f); }
+      else if (nFallas === 1) sumar(falla, f);                      // cumple todo menos ese filtro: cuenta para sus opciones
+    }
     const {campo, asc} = porFuente() ? EXP.ordenFte : EXP.orden;
     const cmp = (a, b, k) => {
-      const x = a[k], y = b[k];
+      let x = a[k], y = b[k];
+      if (ETQ_ORDEN.has(k)) { x = mostrarExp(k, x); y = mostrarExp(k, y); }
       return NUMERICAS_EXP.has(k) ? (x - y) : COLL_EXP.compare(String(x ?? ""), String(y ?? ""));
     };
     filas.sort((a, b) => {
@@ -2447,8 +2518,9 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
       for (const k of ORDEN_FTE) { if (k === campo) continue; const t = cmp(a, b, k); if (t) return t; }   // desempate: servidor, base, tabla, campo
       return 0;
     });
-    return filas;
+    return {filas, conteos};
   }
+  const filasFiltradasExp = () => evaluarExp().filas;
 
   function leerColumnasGuardadas(cols, clave){
     try {
@@ -2467,15 +2539,21 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
   const colsVista = () => porFuente() ? [COLS_FTE, EXP.columnasFte] : [COLS_EXP, EXP.columnas];
 
   // Desplegable de seleccion multiple (filtro o selector de columnas).
-  function desplegableMulti(titulo, opciones, seleccion, alCambiar, conConteo){
+  function desplegableMulti(titulo, opciones, seleccion, alCambiar, conConteo, extra){
+    extra = extra || {};
     const insignia = el("span", {clase:"cuenta"});
-    const refrescar = () => { insignia.textContent = String(seleccion.size); insignia.hidden = !seleccion.size; };
+    // en "Columnas" la insignia dice cuantas de cuantas; en los filtros, cuantos valores hay marcados
+    const refrescar = () => {
+      insignia.textContent = extra.total ? seleccion.size + " de " + extra.total : String(seleccion.size);
+      insignia.hidden = !seleccion.size;
+    };
     const cajas = [];
     const lista = el("div", {clase:"filtro-lista"}, opciones.map(o => {
       const c = el("input", {type:"checkbox"}); c.checked = seleccion.has(o.valor);
       c.addEventListener("change", () => { c.checked ? seleccion.add(o.valor) : seleccion.delete(o.valor); refrescar(); alCambiar(); });
-      const fila = el("label", {clase:"opcion-filtro"}, [c, el("span", {texto:o.etiqueta}), conConteo ? el("span", {clase:"nota", texto:String(o.n)}) : null]);
-      cajas.push([c, o, fila]);
+      const cuenta = conConteo ? el("span", {clase:"nota", texto:String(o.n), title: extra.unidad || null}) : null;
+      const fila = el("label", {clase:"opcion-filtro" + (conConteo && !o.n ? " sin-filas" : "")}, [c, el("span", {texto:o.etiqueta}), cuenta]);
+      cajas.push([c, o, fila, cuenta]);
       return fila;
     }));
     const visibles = () => cajas.filter(([, , fila]) => fila.style.display !== "none");
@@ -2485,15 +2563,23 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
       cajas.forEach(([, o, fila]) => { fila.style.display = sinTildes(o.etiqueta).toLowerCase().includes(q) ? "" : "none"; });
     });
     const botones = el("div", {clase:"filtro-botones"}, [
-      el("button", {type:"button", texto:"Todos", onclick: () => { visibles().forEach(([c, o]) => { c.checked = true; seleccion.add(o.valor); }); refrescar(); alCambiar(); }}),
-      el("button", {type:"button", texto:"Ninguno", onclick: () => { visibles().forEach(([c, o]) => { c.checked = false; seleccion.delete(o.valor); }); refrescar(); alCambiar(); }}),
+      el("button", {type:"button", texto:"Marcar todos", onclick: () => { visibles().forEach(([c, o]) => { c.checked = true; seleccion.add(o.valor); }); refrescar(); alCambiar(); }}),
+      el("button", {type:"button", texto:"Quitar todos", onclick: () => { visibles().forEach(([c, o]) => { c.checked = false; seleccion.delete(o.valor); }); refrescar(); alCambiar(); }}),
     ]);
-    const det = el("details", {clase:"filtro"}, [el("summary", null, [titulo, insignia]),
-      el("div", {clase:"filtro-panel"}, [buscador, botones, lista])]);
+    const det = el("details", {clase:"filtro"}, [el("summary", {title: extra.ayuda || null}, [titulo, insignia]),
+      el("div", {clase:"filtro-panel"}, [extra.ayuda ? el("div", {clase:"filtro-ayuda", texto:extra.ayuda}) : null,
+        buscador, botones, lista])]);
     det.addEventListener("toggle", () => {
       if (det.open) document.querySelectorAll("details.filtro[open]").forEach(x => { if (x !== det) x.open = false; });
     });
     det.refrescar = () => { cajas.forEach(([c, o]) => { c.checked = seleccion.has(o.valor); }); refrescar(); };
+    // conteos por faceta: se actualizan sin rehacer la lista (conserva foco, busqueda y desplegable abierto)
+    det.conteos = m => cajas.forEach(([, o, fila, cuenta]) => {
+      if (!cuenta) return;
+      const n = m.get(o.valor) || 0;
+      cuenta.textContent = String(n);
+      fila.classList.toggle("sin-filas", !n);
+    });
     refrescar();
     return det;
   }
@@ -2513,7 +2599,14 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
 
     const resultado = el("div", {clase:"exp-resultado"});
     const pintar = () => { EXP.pagina = 0; pintarResultadoExp(resultado); };
-    const desplegables = filtros.map(f => desplegableMulti(f.titulo, f.opciones, EXP.sel[f.campo], pintar, true));
+    const unidad = porFuente() ? "fuentes oficiales" : "atributos";
+    const visibles = filtros.filter(f => !f.oculto);
+    const desplegables = visibles.map(f => {
+      const det = desplegableMulti(f.titulo, f.opciones, EXP.sel[f.campo], pintar, true,
+        {ayuda: f.ayuda, unidad: "N.º de " + unidad + " con los demás filtros aplicados"});
+      det.dataset.campo = f.campo;
+      return det;
+    });
     const [defsCols, elegidas] = colsVista();
     const selCols = new Set(elegidas);
     const colsDesp = desplegableMulti("Columnas", defsCols.map(c => ({valor:c[0], etiqueta:c[1]})), selCols, () => {
@@ -2521,7 +2614,7 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
       const nuevas = defsCols.map(c => c[0]).filter(k => selCols.has(k));
       if (porFuente()) EXP.columnasFte = nuevas; else EXP.columnas = nuevas;
       guardarColumnas(); pintarResultadoExp(resultado);
-    }, false);
+    }, false, {total: defsCols.length});
     colsDesp.classList.add("filtro-columnas");
 
     // selector de vista: los filtros y el texto se conservan al cambiar
@@ -2559,13 +2652,17 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
     const barra = el("div", {clase:"exp-barra"}, [
       el("div", {clase:"exp-fila"}, [selVista, texto, excel]), avisoConf,
       el("div", {clase:"exp-fila exp-filtros"}, [...desplegables, colsDesp, limpiar]),
+      el("div", {clase:"nota exp-unidad", texto:"Los números de cada filtro cuentan " + unidad +
+        " con el texto y los demás filtros aplicados; en gris, las opciones que hoy no dejan resultados."}),
     ]);
+    resultado.desplegables = desplegables;
     pintarResultadoExp(resultado);
     return [cab, barra, resultado];
   }
 
   function pintarResultadoExp(cont){
-    const filas = filasFiltradasExp();
+    const {filas, conteos} = evaluarExp();
+    for (const det of cont.desplegables || []) if (conteos[det.dataset.campo]) det.conteos(conteos[det.dataset.campo]);
     const [defsCols, elegidas] = colsVista();
     const cols = defsCols.filter(c => elegidas.includes(c[0]));
     const fte = porFuente(), orden = fte ? EXP.ordenFte : EXP.orden;
@@ -2587,7 +2684,7 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
           onclick: () => { EXP.pagina++; pintarResultadoExp(cont); }}),
       ]) : null,
     ]);
-    if (!filas.length){ cont.replaceChildren(nav, el("div", {clase:"vacio", texto: fte ? "Ninguna fuente oficial cumple los filtros." : "Ningún atributo cumple los filtros."})); return; }
+    if (!filas.length){ cont.replaceChildren(nav, el("div", {clase:"vacio", texto: mensajeVacioExp(fte)})); return; }
 
     const thead = el("thead", null, el("tr", null, cols.map(([k, etq]) => {
       const activo = orden.campo === k;
@@ -2600,10 +2697,22 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
     const tbody = el("tbody", null, pagina.map(f => el("tr", null, cols.map(([k, , , largo]) => {
       if (k === "codigo") return el("td", null, el("button", {type:"button", clase:"enlace-atributo", texto:f.codigo,
         title:"Ver el atributo en «Atributos y fuentes»", onclick: () => irA("atributos", f.dominio, f.nombre_atributo)}));
-      return el("td", {clase: largo ? "largo" : null, texto: v(f[k] === 0 ? "0" : f[k])});
+      const x = mostrarExp(k, f[k]);
+      return el("td", {clase: largo ? "largo" : null, texto: v(x === 0 ? "0" : x),
+        title: k === "estado_vinculo" && f[k] && REL ? (REL.descripcion_estado || {})[f[k]] || null : null});
     }))));
     cont.replaceChildren(nav, el("div", {clase:"tabla-wrap exp-tabla"}, el("table", null, [thead, tbody])));
     guardarEstadoExp();
+  }
+
+  // Sin resultados: si el filtro de dominio solo tiene dominios sin atributos activos, se dice eso
+  function mensajeVacioExp(fte){
+    const doms = [...(EXP.sel.dominio || [])];
+    const sinAtributos = doms.filter(c => (porCodigo.get(c) || {atributos:[1]}).atributos.length === 0);
+    if (doms.length && sinAtributos.length === doms.length)
+      return (doms.length === 1 ? "El dominio " + doms[0] + " no tiene" : "Los dominios " + doms.join(", ") + " no tienen") +
+        " atributos activos cargados.";
+    return fte ? "Ninguna fuente oficial cumple los filtros." : "Ningún atributo cumple los filtros.";
   }
 
   function bajarArchivo(blob, nombre){
@@ -2616,21 +2725,22 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
   function descargarExplorador(filas){
     const cols = COLS_EXP.filter(c => EXP.columnas.includes(c[0]));
     const base = f => ({dominio:f.dominio, codigo:f.codigo, nombre_atributo:f.nombre_atributo});
-    const colsBase = [["dominio","Dominio",10], ["codigo","Código del atributo",14], ["nombre_atributo","Nombre del atributo",34]];
+    const colsBase = [["dominio","Dominio",10], ["codigo","Código",14], ["nombre_atributo","Atributo",34]];
     const hojas = [
       {nombre:"Resultado", columnas: cols.map(([k, etq, ancho, largo]) => [k, etq, ancho, largo]),
-       filas: filas.map(f => Object.fromEntries(cols.map(([k]) => [k, f[k]])))},   // n_* y resta salen como numero
+       filas: filas.map(f => Object.fromEntries(cols.map(([k]) => [k, mostrarExp(k, f[k])])))},   // n_* y resta salen como numero
       {nombre:"Fuentes oficiales", columnas: colsBase.concat([["servidor","Servidor",18], ["base_datos","Base de datos",40],
         ["tabla","Tabla / archivo",28], ["nombre_campo","Campo",24], ["es_fuente_primaria","Primaria",9], ["tipo_campo","Tipo de campo",12],
         ["longitud_campo","Longitud",9], ["acepta_valores_nulos","Acepta nulos",9], ["formula_calculo","Fórmula de cálculo",70,1],
-        ["lista_valores_validos","Valores válidos",50,1], ["fecha_aprobacion","Fecha de aprobación",13], ["version","Versión",8]]),
-       filas: filas.flatMap(f => f._a.fuentes_oficiales.map(x => ({...x, ...base(f)})))},
+        ["lista_valores_validos","Valores válidos",50,1], ["fecha_aprobacion","Fecha de aprobación",13]]),
+       filas: filas.flatMap(f => f._a.fuentes_oficiales.map(x => ({...Object.fromEntries(Object.entries(x).map(([k, y]) => [k, limpio(y)])),
+         longitud_campo: numEntero(x.longitud_campo), ...base(f)})))},
       {nombre:"Fuentes de consumo", columnas: colsBase.concat([["clase","Clase",14], ["servidor","Servidor",18],
         ["base_datos","Base de datos / colección",32], ["tabla","Tabla",28], ["nombre_campo","Campo",24], ["fecha_aprobacion","Fecha de aprobación",13]]),
-       filas: filas.flatMap(f => f._a.fuentes_consumo.map(x => ({...x, ...base(f)})))},
+       filas: filas.flatMap(f => f._a.fuentes_consumo.map(x => ({...Object.fromEntries(Object.entries(x).map(([k, y]) => [k, limpio(y)])), ...base(f)})))},
     ];
     const etiquetasFiltro = Object.fromEntries(filtrosExp().map(f => [f.campo, f]));
-    const aplicados = Object.entries(EXP.sel).filter(([, s]) => s.size).map(([c, s]) => {
+    const aplicados = Object.entries(EXP.sel).filter(([c, s]) => s.size && etiquetasFiltro[c]).map(([c, s]) => {
       const def = etiquetasFiltro[c];
       return {campo: def ? def.titulo : c, valor: [...s].map(x => ((def && def.opciones.find(o => o.valor === x)) || {etiqueta:x}).etiqueta).join(", ")};
     });
@@ -2916,8 +3026,8 @@ div.vis-tooltip{font:12px/1.4 "Segoe UI",Arial,sans-serif;white-space:pre-line;b
   }
 
   function descargarPlanes(filas, d){
-    const cols = [["dominio","Dominio",10], ["nombre_dominio","Nombre del dominio",28], ["atributo","Código del atributo",14],
-      ["nombre_atributo","Nombre del atributo",32], ["id_problema","Id del problema",12], ["dimension","Dimensión",14],
+    const cols = [["dominio","Dominio",10], ["nombre_dominio","Nombre del dominio",28], ["atributo","Código",14],
+      ["nombre_atributo","Atributo",32], ["id_problema","Id del problema",12], ["dimension","Dimensión",14],
       ["categoria","Categoría",30,1], ["fuente_oficial_sistema","Fuente oficial / sistema",26,1], ["tipo_plan","Tipo de plan",14],
       ["categoria_plan","Categoría del plan",24], ["subcategoria_plan","Subcategoría del plan",24], ["priorizacion","Priorización",11],
       ["estado","Estado",13], ["avance_num","Avance (%)",10], ["vencido","Vencido",9],

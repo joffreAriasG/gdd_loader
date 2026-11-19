@@ -26,6 +26,12 @@ SQL_DOMINIOS = text("""
 
 SQL_TIENE_ESTADO_VIGENCIA = text("SELECT COL_LENGTH('gdd.dominio_dato', 'id_estado_vigencia')")
 
+# Descripcion de la clasificacion de dato personal (v0.17.0, GDD-06): el Explorador muestra
+# "DP.ECID. · Datos Identificativos ...". Es OPCIONAL: si la columna tipo_dato no existe en
+# esta base, el sitio sigue y muestra solo el codigo (no se inventa la columna).
+SQL_TIENE_TIPO_DATO_PERSONAL = text("SELECT COL_LENGTH('gdd.cat_dato_personal', 'tipo_dato')")
+SQL_CAT_DATO_PERSONAL = text("SELECT codificacion, tipo_dato FROM gdd.cat_dato_personal")
+
 
 class FaltaEstadoVigenciaError(RuntimeError):
     """La base no tiene gdd.dominio_dato.id_estado_vigencia (falta correr la migracion)."""
@@ -177,4 +183,7 @@ def leer_todo(conn: Connection) -> dict[str, list[dict]]:
         raise FaltaEstadoVigenciaError(
             "gdd.dominio_dato no tiene id_estado_vigencia. Correr antes "
             "db/migraciones/20261111_dominio_estado_vigencia.sql en DGODELIVERY.")
-    return {nombre: [dict(f._mapping) for f in conn.execute(sql)] for nombre, sql in CONSULTAS.items()}
+    datos = {nombre: [dict(f._mapping) for f in conn.execute(sql)] for nombre, sql in CONSULTAS.items()}
+    datos["cat_dato_personal"] = ([dict(f._mapping) for f in conn.execute(SQL_CAT_DATO_PERSONAL)]
+                                  if conn.execute(SQL_TIENE_TIPO_DATO_PERSONAL).scalar() is not None else [])
+    return datos

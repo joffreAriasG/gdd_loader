@@ -323,7 +323,7 @@ def test_indicadores_en_el_menu():
 def test_explorador_de_atributos_en_el_menu():
     html = generar_html(construir_modelo(_datos(), _grafo_sintetico()), "x")
     assert '{id:"explorador", titulo:"Explorador de atributos"}' in html
-    for fn in ("function vistaExplorador", "function filasFiltradasExp", "function descargarExplorador", "function desplegableMulti"):
+    for fn in ("function vistaExplorador", "const filasFiltradasExp", "function descargarExplorador", "function desplegableMulti"):
         assert fn in html
     # filtros pedidos: dominio, criticidad, compartido/similar (y columnas seleccionables)
     for filtro in ('["dominio","Dominio"]', '["criticidad","Criticidad"]', '["compartido_similar","Compartido / similar"]'):
@@ -342,12 +342,13 @@ def test_leer_todo_ejecuta_una_consulta_por_entidad():
     fila = MagicMock()
     fila._mapping = {"codigo_dominio": "ADS"}
     columna = MagicMock()
-    columna.scalar.return_value = 8                     # COL_LENGTH de id_estado_vigencia: existe
-    conn.execute.side_effect = lambda sql: columna if sql is sitio_repository.SQL_TIENE_ESTADO_VIGENCIA else [fila]
+    columna.scalar.return_value = 8                     # COL_LENGTH: la columna existe
+    columnas = (sitio_repository.SQL_TIENE_ESTADO_VIGENCIA, sitio_repository.SQL_TIENE_TIPO_DATO_PERSONAL)
+    conn.execute.side_effect = lambda sql: columna if sql in columnas else [fila]
     datos = sitio_repository.leer_todo(conn)
     assert set(datos) == {"dominios", "roles", "clasificaciones", "responsables", "respaldos", "atributos",
-                          "fuentes_oficiales", "fuentes_consumo", "investigacion", "planes"}
-    assert conn.execute.call_count == 11                # comprobacion de la columna + 10 entidades
+                          "fuentes_oficiales", "fuentes_consumo", "investigacion", "planes", "cat_dato_personal"}
+    assert conn.execute.call_count == 13                # 2 comprobaciones de columna + 10 entidades + catalogo DP
     assert datos["dominios"] == [{"codigo_dominio": "ADS"}]
     assert "estado_vigencia" in str(sitio_repository.SQL_DOMINIOS)
 
@@ -738,14 +739,17 @@ def test_paginas_excedidas_y_escribir_sitio_sin_sobrescribir(tmp_path):
 
 def test_explorador_filtro_servidor_y_vista_por_fuente_oficial():
     html = generar_html(construir_modelo(_datos_vigencia()), "x")
-    assert '["servidor_fo","Servidor (f. oficial)"]' in html                    # filtro en las dos vistas
+    assert '["servidor_fo", porFuente() ? "Servidor" : "Servidor de la fuente oficial"]' in html   # filtro en las dos vistas
     assert "function construirFilasFte" in html and "function descargarFuentesExp" in html
     for col in ('["f_servidor","Servidor"', '["f_base_datos","Base de datos"', '["f_tabla","Tabla / archivo"',
                 '["f_campo","Campo"', '["f_primaria","Primaria"', '["f_tipo","Tipo de campo"', '["f_longitud","Longitud"',
                 '["f_nulos","Acepta nulos"', '["f_formula","Fórmula de cálculo"', '["f_valores","Valores válidos"'):
         assert col in html
+    assert '["f_version"' not in html                  # v0.17.0: la version de la fuente siempre es 1
+    for col in ():
+        assert col in html
     # el atributo cumple el filtro si ALGUNA de sus fuentes esta en el servidor elegido
-    assert "valoresDe(f, c).some(x => s.has(x))" in html
+    assert "valoresDe(f, c).some(x => EXP.sel[c].has(x))" in html
     # los dominios confidenciales no aportan filas (no traen el detalle de sus fuentes)
     assert "FILAS_EXP.filter(fa => !esConf(fa._d))" in html
     assert 'botonVista("fuente", "Por fuente oficial"' in html and 'botonVista("atributo", "Por atributo"' in html
@@ -757,5 +761,61 @@ def test_explorador_cambio_de_vista_conserva_filtros_y_muestra_selecciones_sin_f
     assert "if (d && !expCambioVista)" in html and "expCambioVista = true; pintarContenido();" in html
     # un valor elegido sin filas en la vista actual se dibuja con 0 (se puede desmarcar)
     assert "for (const valor of EXP.sel[campo]) if (!n.has(valor)) n.set(valor, 0);" in html
-    # el filtrado no recalcula los conteos de los desplegables
-    assert "new Set(camposFiltroExp().map(([c]) => c))" in html and 'new Intl.Collator("es", {numeric:true})' in html
+    assert 'new Intl.Collator("es", {numeric:true})' in html
+
+
+# --- v0.17.0 (GDD-06): etiquetas, criterios y conteos de los filtros del Explorador ---
+
+def test_explorador_estado_del_vinculo_en_texto_y_vacios_con_criterio():
+    html = generar_html(construir_modelo(_datos(), _grafo_sintetico()), "x")
+    assert 'SIN_VINCULO:"Sin atributo primario resuelto"' in html and "texto: etqEstado(e)" in html   # Relaciones y Explorador
+    assert 'const SIN_DATO = "(sin dato)"' in html
+    assert 'VACIO_PROPIO = {compartido_similar:"Ninguno", estado_vinculo:"No aplica"}' in html
+    assert '"(ninguno)"' not in html and '"(sin relación)"' not in html and '"(sin servidor)"' not in html
+
+
+def test_explorador_conteos_por_faceta_y_filtros_de_un_valor_ocultos():
+    html = generar_html(construir_modelo(_datos()), "x")
+    assert "function evaluarExp" in html and "else if (nFallas === 1) sumar(falla, f);" in html
+    assert "det.conteos = m =>" in html and 'fila.classList.toggle("sin-filas", !n)' in html
+    assert "[...n.values()].filter(x => x > 0).length < 2 && !EXP.sel[campo].size" in html
+    assert "if (!n.has(d.codigo)) n.set(d.codigo, 0)" in html                 # dominios sin atributos con 0
+    assert "atributos activos cargados." in html
+
+
+def test_clasificacion_dato_personal_con_descripcion_si_el_catalogo_la_tiene():
+    datos = _datos(cat_dato_personal=[{"codificacion": "DP.ECID.", "tipo_dato": "Datos Identificativos"},
+                                      {"codificacion": "DP.X.", "tipo_dato": None}])
+    assert construir_modelo(datos)["resumen"]["dato_personal"] == {"DP.ECID.": "Datos Identificativos"}
+    assert construir_modelo(_datos())["resumen"]["dato_personal"] == {}       # base sin la columna: solo el codigo
+
+
+def test_leer_todo_sin_tipo_dato_personal_no_lee_el_catalogo():
+    conn = MagicMock()
+    fila = MagicMock()
+    fila._mapping = {"x": 1}
+    existe, no_existe = MagicMock(), MagicMock()
+    existe.scalar.return_value, no_existe.scalar.return_value = 8, None
+    def ejecutar(sql):
+        if sql is sitio_repository.SQL_TIENE_ESTADO_VIGENCIA:
+            return existe
+        if sql is sitio_repository.SQL_TIENE_TIPO_DATO_PERSONAL:
+            return no_existe
+        assert sql is not sitio_repository.SQL_CAT_DATO_PERSONAL     # no se consulta una columna que no existe
+        return [fila]
+    conn.execute.side_effect = ejecutar
+    assert sitio_repository.leer_todo(conn)["cat_dato_personal"] == []
+    assert str(sitio_repository.SQL_CAT_DATO_PERSONAL).strip().upper().startswith("SELECT")
+
+
+def test_explorador_correcciones_de_la_revision_v0170():
+    html = generar_html(construir_modelo(_datos()), "x")
+    # sin datos de relaciones no se afirma "No aplica"
+    assert "(REL ? VACIO_PROPIO.estado_vinculo : x)" in html
+    # se ordena por lo que se ve; el "-" no entra en la fuente primaria; celdas vacias si ninguna fuente tiene el dato
+    assert 'new Set(["estado_vinculo", "compartido_similar", ...Object.keys(VALORES_EXP)])' in html
+    assert ".map(limpio).filter(Boolean)" in html and 'vals.some(x => x !== "")' in html
+    # botones del desplegable distintos de la opcion "Ninguno"; mismos encabezados en todos los Excel
+    assert 'texto:"Quitar todos"' in html and 'texto:"Ninguno", onclick' not in html
+    assert '"Código del atributo"' not in html and '"Nombre del atributo"' not in html
+    assert "estado:etqEstado(x.estado)" in html
