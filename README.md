@@ -124,6 +124,24 @@ listas de los catálogos. `FuentesPrimarias` siempre sale del molde. La hoja
 Para limpiar esa hoja en un molde nuevo (no cambia su huella):
 `python -m gdd_loader.plantilla_cli limpiar --molde <molde> --salida <nuevo>`
 
+### Respaldo lógico de gdd y staging (v0.15.0)
+
+```powershell
+python -m gdd_loader.respaldo_cli crear                       # usa GDD_CARPETA_RESPALDOS
+python -m gdd_loader.respaldo_cli crear --destino "C:\ruta"   # o una carpeta explícita
+python -m gdd_loader.respaldo_cli verificar "C:\ruta\respaldo_DGODELIVERY_AAAAMMDD_HHMMSS.zip"
+```
+
+Solo lectura: necesita SELECT, no permiso de BACKUP. Deja un zip con un CSV
+por tabla de `gdd` y `staging` y un `manifiesto.json` con columnas, tipos,
+filas y SHA-256. En el CSV, NULL es un campo vacío y el texto va siempre
+entre comillas (`""` es texto vacío). Al terminar verifica el zip.
+
+- Correrlo **antes de cada carga, migración o despliegue**, cuando no haya una carga en curso.
+- La carpeta debe estar fuera del servidor y con acceso solo del equipo de gobierno de datos.
+- No reemplaza el backup del DBA: no guarda índices, permisos ni otros esquemas.
+- Nunca borra respaldos anteriores.
+
 ### Notificación de cargas (v0.5.0)
 
 Con `GDD_CARPETA_NOTIFICACIONES` configurada, `procesar_cli` deja por cada
